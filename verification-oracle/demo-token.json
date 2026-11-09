@@ -1,0 +1,13 @@
+{
+  "name": "Demo US Dollar",
+  "symbol": "dUSD",
+  "decimals": 6,
+  "mint": "BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc",
+  "ata": "EDt5jYJA4K3nrzdxVwusGmjuun2Xby3tVC2KPMJVbFNV",
+  "mintAuthority": "7bsn4jyj5S23bpdJUhTF949pqj6UrNvQWbavCBWsDtFT",
+  "supply": "1000000",
+  "createSignature": "65w5qQGLQCnE9pLsF78J7E1uawpC2t8EoP8RFFDNg9oaHjtLWXmdin7bjy6xDLtYc2gs5CE5fjUNPHMR3qDnBUFr",
+  "mintSignature": "4bfskU7SNxxtYukECAFoj2RM1yH7oNiPHjT3yhkq4S7aymkgn9kfNdDu3zSnLmGBjYpLWSs49sKndRSTK6G5KMoc",
+  "createdAt": "2026-11-08T16:26:50.108Z",
+  "note": "Self-minted devnet demo token. Devnet only — not USDC."
+}

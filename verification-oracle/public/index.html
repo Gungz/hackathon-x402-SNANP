@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>VerificationOracle — Pay-per-Proof Event Verification</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f7fa;
+      color: #1a1a1a;
+      line-height: 1.6;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 860px; margin: 0 auto; }
+    header { margin-bottom: 1.5rem; }
+    h1 { font-size: 1.5rem; }
+    .subtitle { color: #666; font-size: 0.9rem; }
+    .badge { display: inline-block; background: #0ea5e9; color: white; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.75rem; margin-top: 0.4rem; }
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .form-group { margin-bottom: 0.9rem; }
+    label { display: block; margin-bottom: 0.3rem; font-weight: 600; font-size: 0.85rem; }
+    input[type="text"] {
+      width: 100%;
+      padding: 0.6rem;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-family: inherit;
+    }
+    button {
+      background: #0ea5e9;
+      color: white;
+      border: none;
+      padding: 0.55rem 1.1rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #0284c7; }
+    button:disabled { background: #9ca3af; cursor: not-allowed; }
+    button.secondary { background: #374151; }
+    button.secondary:hover { background: #111827; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; }
+    .muted { color: #666; font-size: 0.8rem; }
+    .proof-item { border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem; }
+    .outcome { font-weight: 700; text-transform: uppercase; font-size: 0.8rem; }
+    .outcome.yes { color: #16a34a; }
+    .outcome.no { color: #dc2626; }
+    .outcome.undecided { color: #d97706; }
+    .pill { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.72rem; background: #eef2ff; color: #4338ca; }
+    .pill.refundable { background: #fffbeb; color: #b45309; }
+    .pill.claimable { background: #ecfdf5; color: #047857; }
+    .status-line { font-size: 0.85rem; margin: 0.5rem 0 0.75rem; }
+    .ok { color: #047857; }
+    .err { color: #b91c1c; }
+    .claim-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    .empty { color: #777; font-size: 0.9rem; }
+    code { background: #f3f4f6; padding: 0.1rem 0.35rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>VerificationOracle</h1>
+      <div class="subtitle">Pay-per-proof event verification via x402 on Solana Devnet</div>
+      <div class="badge">x402 V2 · Solana Devnet · dUSD (self-minted demo token)</div>
+    </header>
+
+    <div class="card">
+      <h2>1. Request Verification</h2>
+      <form id="verifyForm">
+        <div class="form-group">
+          <label for="question">Question</label>
+          <input type="text" id="question" placeholder="Did Arsenal beat Chelsea?" required />
+        </div>
+        <div class="form-group">
+          <label for="criteria">Resolution Criteria</label>
+          <input type="text" id="criteria" placeholder="Final score after 90 minutes" required />
+        </div>
+        <div class="form-group">
+          <label for="sources">Allowed Sources (comma-separated URLs)</label>
+          <input type="text" id="sources" placeholder="https://www.espn.com/..." />
+          <div class="muted" style="margin-top: 0.25rem;">Allowlisted domains: bbc.com, espn.com, reuters.com, apnews.com</div>
+        </div>
+        <button type="submit">Verify Event</button>
+        <div class="muted" style="margin-top: 0.4rem;">
+          Requires a wallet-approved 0.01 dUSD deposit — connect your wallet in section 2 first, or run the CLI:
+          <code>npm run verify -- --question "…" --criteria "…"</code>
+        </div>
+      </form>
+      <div id="verifyResult"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <h2>2. Operator — Escrow Claims</h2>
+        <button id="connectWalletBtn" class="secondary">Connect Wallet</button>
+      </div>
+      <div id="walletStatus" class="status-line muted">Not connected. Phantom or Solflare required to claim from escrow.</div>
+      <div class="row" style="margin: 0.5rem 0;">
+        <span class="muted">Pending escrow (claimable + refundable)</span>
+        <button id="refreshPendingBtn" class="secondary" style="padding: 0.3rem 0.6rem; font-size: 0.75rem;">Refresh</button>
+      </div>
+      <div id="pendingClaims" class="empty">No pending escrow records yet — run a verification first.</div>
+      <div id="escrowTxStatus" class="status-line"></div>
+    </div>
+
+    <div class="card">
+      <h2>How the escrow works</h2>
+      <p class="muted" style="font-size: 0.85rem;">
+        Client deposits dUSD into the on-chain escrow PDA → oracle verifies → YES/NO releases to the operator on claim;
+        UNDECIDED refunds the client. The operator (this dashboard) signs <code>claim</code> / <code>refund</code> transactions
+        with their own wallet — the server never holds a private key.
+      </p>
+      <p class="muted" style="font-size: 0.85rem; margin-top: 0.5rem;">
+        Program ID: <code>He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a</code> (Devnet)
+      </p>
+    </div>
+  </div>
+
+  <script type="module">
+    // CDNs
+    import {
+      Connection,
+      PublicKey,
+      Transaction,
+      TransactionInstruction,
+      SystemProgram,
+      LAMPORTS_PER_SOL,
+    } from "https://esm.sh/@solana/web3.js@1.98.2";
+    import { getAssociatedTokenAddress } from "https://esm.sh/@solana/spl-token@0.4.9";
+
+    // Escrow program configuration (from Anchor IDL)
+    const PROGRAM_ID = new PublicKey("He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a");
+    const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+    // Self-minted devnet demo token (dUSD) — Circle's USDC faucet is CAPTCHA-gated,
+    // so the demo token acts as the USDC stand-in (same SPL Token program, same path).
+    const DEMO_TOKEN_MINT = new PublicKey("BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc");
+    const CLAIM_DISC = new Uint8Array([62, 198, 214, 193, 213, 159, 108, 210]);
+    const REFUND_DISC = new Uint8Array([2, 96, 183, 251, 63, 208, 46, 46]);
+    const DEPOSIT_DISC = new Uint8Array([242, 35, 198, 137, 82, 225, 242, 182]);
+    // Oracle operator wallet (receives escrow claims). Matches SOLANA_PAY_TO in .env — public key, safe to embed.
+    const SOLANA_PAY_TO = new PublicKey("6UBWeY293oqa98E5chTJcjZdqwqJL4Y93o56gep2HBMy");
+    const AMOUNT_BASE_UNITS = 10_000n; // $0.01 dUSD
+
+    const API = window.location.origin;
+    const connection = new Connection("https://api.devnet.solana.com", "confirmed");
+
+    let provider = null;
+    let connectedWallet = null;
+
+    function byId(id) { return document.getElementById(id); }
+    function setWalletStatus(msg, kind) {
+      const el = byId("walletStatus");
+      el.textContent = msg;
+      el.className = "status-line " + (kind === "ok" ? "ok" : kind === "err" ? "err" : "muted");
+    }
+    function setEscrowTx(msg, kind) {
+      const el = byId("escrowTxStatus");
+      el.textContent = msg;
+      el.className = "status-line " + (kind === "ok" ? "ok" : "err");
+    }
+
+    // ── Wallet connection ──
+    function findWallet() {
+      if (window.solana?.isPhantom) return window.solana;
+      if (window.solflare?.isSolflare) return window.solflare;
+      return window.solana || window.solflare || null;
+    }
+
+    byId("connectWalletBtn").addEventListener("click", async () => {
+      provider = findWallet();
+      if (!provider) {
+        setWalletStatus("No Solana wallet found. Install Phantom or Solflare.", "err");
+        return;
+      }
+      try {
+        const res = await provider.connect();
+        connectedWallet = res?.publicKey ?? provider.publicKey;
+        setWalletStatus(`Connected: ${connectedWallet.toBase58().slice(0, 4)}...${connectedWallet.toBase58().slice(-4)}`, "ok");
+        byId("connectWalletBtn").textContent = "Reconnect";
+      } catch (err) {
+        setWalletStatus("Wallet connection rejected: " + (err.message || err), "err");
+      }
+    });
+
+    // ── Verification form ──
+    byId("verifyForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const question = byId("question").value.trim();
+      const criteria = byId("criteria").value.trim();
+      const sourcesInput = byId("sources").value.trim();
+      const allowedSources = sourcesInput ? sourcesInput.split(",").map(s => s.trim()).filter(Boolean) : [];
+
+      byId("verifyResult").innerHTML = "<p class='muted' style='margin-top:0.5rem;'>Verifying…</p>";
+
+      try {
+        // First request → 402 challenge
+        const res1 = await fetch(`${API}/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question, criteria, allowedSources }),
+        });
+
+        let result;
+        if (res1.status === 402) {
+          if (!connectedWallet) {
+            byId("verifyResult").innerHTML = `
+              <p class="err" style="margin-top:0.5rem;">
+                Payment is required (402): sign and submit a real deposit transaction of
+                <strong>0.01 dUSD</strong> to the escrow PDA.<br/>
+                <strong>Connect your wallet first</strong> — the CLI can do the same:
+                <code>npm run verify -- --question "…" --criteria "…"</code>
+              </p>`;
+            return;
+          }
+
+          byId("verifyResult").innerHTML = "<p class='muted' style='margin-top:0.5rem;'>Depositing 0.01 dUSD to the escrow (approve in your wallet)…</p>";
+          const depositTx = await buildDepositTx();
+          setEscrowTx("Awaiting wallet approval for deposit…");
+          const signed = await provider.signAndSendTransaction(depositTx);
+          const sig = signed.signature;
+          setEscrowTx(`Deposit submitted: ${sig.slice(0, 8)}… waiting for confirmation…`);
+
+          try {
+            await connection.confirmTransaction(sig, "confirmed");
+            setEscrowTx(`Deposit confirmed: https://explorer.solana.com/tx/${sig}?cluster=devnet`, "ok");
+          } catch (confErr) {
+            setEscrowTx(`Deposit submitted but unconfirmed: ${sig} (${confErr.message || confErr})`, "err");
+          }
+
+          const res2 = await fetch(`${API}/verify`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "PAYMENT-SIGNATURE": sig },
+            body: JSON.stringify({ question, criteria, allowedSources }),
+          });
+          result = await res2.json();
+        } else {
+          result = await res1.json();
+        }
+
+        const outcomeClass = (result.outcome || "undecided").toLowerCase();
+        byId("verifyResult").innerHTML = `
+          <div class="proof-item" style="margin-top: 0.75rem;">
+            <div class="row">
+              <span class="outcome ${outcomeClass}">${result.outcome}</span>
+              <span class="pill ${result.escrowStatus === "refundable" ? "refundable" : "claimable"}">escrow: ${result.escrowStatus}</span>
+            </div>
+            <div class="muted" style="margin: 0.4rem 0;">${question}</div>
+            <div class="muted">Confidence: ${Math.round((result.confidence || 0) * 100)}% · LLM: ${result.llmProvider || "groq"} · Proof: <code>${result.proofId}</code></div>
+            ${result.reasoning ? `<div class="muted" style="margin-top:0.4rem; font-style: italic;">${result.reasoning}</div>` : ""}
+            ${Array.isArray(result.evidence) && result.evidence.length > 0 ? `<div class="muted" style="margin-top:0.4rem;">Sources: ${result.evidence.map(e => e.source).join(", ")}</div>` : ""}
+          </div>`;
+        await refreshPending();
+      } catch (err) {
+        byId("verifyResult").innerHTML = `<p class="err" style="margin-top:0.5rem;">Verification failed: ${err.message || err}</p>`;
+      }
+    });
+
+    // ── PDA derivation ──
+    function escrowPda(depositor) {
+      return PublicKey.findProgramAddressSync(
+        [new TextEncoder().encode("escrow"), depositor.toBytes()],
+        PROGRAM_ID
+      )[0];
+    }
+    function escrowTokenPda(depositor) {
+      return PublicKey.findProgramAddressSync(
+        [new TextEncoder().encode("escrow-token"), depositor.toBytes()],
+        PROGRAM_ID
+      )[0];
+    }
+
+    // ── Deposit client (pays into escrow, then verification proceeds) ──
+    async function buildDepositTx() {
+      const depositor = connectedWallet;
+      const escrow = escrowPda(depositor);
+      const escrowToken = escrowTokenPda(depositor);
+      const depositorToken = await getAssociatedTokenAddress(
+        DEMO_TOKEN_MINT,
+        depositor,
+        false,
+        TOKEN_PROGRAM_ID,
+      );
+
+      const data = new Uint8Array(16);
+      data.set(DEPOSIT_DISC, 0);
+      new DataView(data.buffer).setBigUint64(8, AMOUNT_BASE_UNITS, true);
+
+      const keys = [
+        { pubkey: depositor, isSigner: true, isWritable: true },
+        { pubkey: SOLANA_PAY_TO, isSigner: false, isWritable: false }, // beneficiary (oracle operator)
+        { pubkey: escrow, isSigner: false, isWritable: true },
+        { pubkey: escrowToken, isSigner: false, isWritable: true },
+        { pubkey: depositorToken, isSigner: false, isWritable: true },
+        { pubkey: DEMO_TOKEN_MINT, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ];
+
+      const ix = new TransactionInstruction({
+        programId: PROGRAM_ID,
+        keys,
+        data,
+      });
+
+      const tx = new Transaction().add(ix);
+      tx.feePayer = depositor;
+      const { blockhash } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      return tx;
+    }
+
+    async function buildClaimOrRefundTx(record, kind) {
+      const depositor = new PublicKey(record.depositor || record.clientWallet);
+      const escrow = escrowPda(depositor);
+      const escrowToken = escrowTokenPda(depositor);
+      const mint = DEMO_TOKEN_MINT; // dUSD demo token — created by the client keypair for this hackathon
+
+      const beneficiaryToken = await getAssociatedTokenAddress(
+        mint,
+        connectedWallet,
+        false,
+        TOKEN_PROGRAM_ID,
+      );
+
+      const depositorToken = await getAssociatedTokenAddress(
+        mint,
+        depositor,
+        false,
+        TOKEN_PROGRAM_ID,
+      );
+
+      const disc = kind === "claim" ? CLAIM_DISC : REFUND_DISC;
+      const data = new Uint8Array(8);
+      data.set(disc, 0);
+
+      let keys;
+      if (kind === "claim") {
+        keys = [
+          { pubkey: escrow, isSigner: false, isWritable: true },
+          { pubkey: escrowToken, isSigner: false, isWritable: true },
+          { pubkey: beneficiaryToken, isSigner: false, isWritable: true },
+          { pubkey: connectedWallet, isSigner: true, isWritable: false },
+          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        ];
+      } else {
+        keys = [
+          { pubkey: escrow, isSigner: false, isWritable: true },
+          { pubkey: escrowToken, isSigner: false, isWritable: true },
+          { pubkey: depositorToken, isSigner: false, isWritable: true },
+          { pubkey: depositor, isSigner: true, isWritable: false },
+          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        ];
+      }
+
+      const ix = new TransactionInstruction({
+        programId: PROGRAM_ID,
+        keys,
+        data,
+      });
+
+      const tx = new Transaction().add(ix);
+      tx.feePayer = connectedWallet;
+      const { blockhash } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      return tx;
+    }
+
+    async function sendAndConfirm(tx) {
+      const signed = await provider.signAndSendTransaction(tx);
+      const sig = signed.signature;
+      setEscrowTx(`Submitted ${tx.instructions[0].programId.equals(PROGRAM_ID) ? "" : ""}tx ${sig.slice(0, 8)}… waiting confirmation…`);
+      try {
+        await connection.confirmTransaction(sig, "confirmed");
+        setEscrowTx(`Confirmed: ${sig}`, "ok");
+      } catch (err) {
+        setEscrowTx(`Submitted but unconfirmed: ${sig} (${err.message || err})`, "err");
+      }
+      return sig;
+    }
+
+    async function claimOrRefund(record, kind) {
+      if (!connectedWallet) {
+        setEscrowTx("Connect your wallet first.", "err");
+        return;
+      }
+      try {
+        setEscrowTx(`Building ${kind} transaction…`);
+        const tx = await buildClaimOrRefundTx(record, kind);
+        await sendAndConfirm(tx);
+        await refreshPending();
+      } catch (err) {
+        setEscrowTx(`${kind} failed: ${err.message || err}`, "err");
+      }
+    }
+
+    // ── Pending Claims panel ──
+    async function refreshPending() {
+      const res = await fetch(`${API}/escrow/pending`);
+      const data = await res.json();
+      const list = byId("pendingClaims");
+      if (!data.pending || data.pending.length === 0) {
+        list.innerHTML = '<div class="empty">No pending escrow records. Run a verification first.</div>';
+        return;
+      }
+      list.innerHTML = data.pending.map(r => {
+        const kind = r.status; // claimable | refundable
+        return `
+          <div class="proof-item">
+            <div class="row">
+              <span class="mono">${r.proofId}</span>
+              <span class="pill ${kind}">${kind}</span>
+            </div>
+            <div class="muted" style="margin: 0.4rem 0;">
+              Amount: ${(Number(r.amount) / 1e6).toFixed(2)} dUSD · Depositor: <code>${(r.depositor || r.clientWallet).slice(0, 8)}…</code>
+            </div>
+            <div class="claim-actions">
+              <button data-kind="${kind === "claimable" ? "claim" : "refund"}" data-id="${r.proofId}" class="action-btn">
+                ${kind === "claimable" ? "Claim to my wallet" : "Refund to depositor"}
+              </button>
+            </div>
+          </div>`;
+      }).join("");
+
+      list.querySelectorAll(".action-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const record = data.pending.find(r => r.proofId === btn.getAttribute("data-id"));
+          const kind = btn.getAttribute("data-kind");
+          await claimOrRefund(record, kind);
+        });
+      });
+    }
+
+    byId("refreshPendingBtn").addEventListener("click", refreshPending);
+
+    // Initial load
+    refreshPending();
+  </script>
+</body>
+</html>
