@@ -46,7 +46,10 @@ async function main() {
         console.log(`Reasoning: ${result.reasoning}`);
       }
       if (Array.isArray(result.evidence) && result.evidence.length > 0) {
-        console.log(`Sources:  ${result.evidence.map((e: any) => e.source).join(", ")}`);
+        result.evidence.forEach((e: any) => {
+          console.log(`Evidence: ${e.title ?? e.url}`);
+          console.log(`          ${e.url ?? e.source}`);
+        });
       }
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);

@@ -1,0 +1,32 @@
+# Render blueprint for VerificationOracle (Express + dashboard + presentation).
+# Deploy: push to GitHub, then in Render: New → Blueprint → pick this repo.
+# All secrets are entered in the Render dashboard (sync: false), never in git.
+services:
+  - type: web
+    name: verification-oracle
+    runtime: node
+    rootDir: verification-oracle
+    plan: free
+    buildCommand: npm install && npm run build --if-present
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: TINYFISH_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SOLANA_PAY_TO
+        sync: false
+      - key: ESCROW_PROGRAM_ID
+        value: He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a
+      - key: USDC_MINT
+        value: BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc
+      - key: X402_NETWORK
+        value: solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
+      - key: X402_PRICE_USD
+        value: "0.01"
+      - key: ALLOWED_DOMAINS
+        value: bbc.com,espn.com,reuters.com,apnews.com

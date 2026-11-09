@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VerificationOracle — Encode Club Solana Hackathon 2026</title>
+<style>
+  :root { --bg:#0b1020; --panel:#141b34; --ink:#e8ecf8; --dim:#9aa5c9; --accent:#38bdf8; --green:#34d399; --amber:#fbbf24; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; height: 100vh; }
+  .deck { height: 100vh; position: relative; }
+  .slide { position: absolute; inset: 0; display: none; padding: 4vh 6vw; flex-direction: column; justify-content: center; }
+  .slide.active { display: flex; }
+  .slide small.kicker { color: var(--accent); letter-spacing: .15em; text-transform: uppercase; font-size: .78rem; margin-bottom: 1.2rem; }
+  h1 { font-size: clamp(2rem, 5.2vw, 4rem); line-height: 1.08; font-weight: 800; }
+  h1 .grad { background: linear-gradient(120deg,#38bdf8,#818cf8 55%,#34d399); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  h2 { font-size: clamp(1.5rem, 3.4vw, 2.6rem); line-height: 1.15; margin-bottom: 1.4rem; }
+  p.lead { font-size: clamp(1rem, 1.6vw, 1.35rem); color: var(--dim); max-width: 52ch; line-height: 1.5; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1rem; margin-top: 1.5rem; }
+  .kpi { background: var(--panel); border: 1px solid #22305c; border-radius: 14px; padding: 1.1rem 1.2rem; }
+  .kpi .n { font-size: clamp(1.5rem, 2.6vw, 2.2rem); font-weight: 800; color: var(--accent); }
+  .kpi .d { color: var(--dim); font-size: .85rem; margin-top: .3rem; }
+  .flow { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: 1.4rem; font-size: .95rem; }
+  .step { background: var(--panel); border: 1px solid #22305c; border-radius: 10px; padding: .55rem .8rem; }
+  .arrow { color: var(--accent); font-weight: 700; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82em; background: #0e1530; border: 1px solid #22305c; border-radius: 6px; padding: .05em .4em; color: #7dd3fc; word-break: break-all; }
+  ul.clean { list-style: none; margin-top: 1.2rem; }
+  ul.clean li { padding: .45rem 0; border-bottom: 1px solid #1c2547; font-size: clamp(.95rem, 1.4vw, 1.15rem); }
+  ul.clean li b { color: var(--green); }
+  .foot { position: absolute; bottom: 2.4vh; left: 6vw; right: 6vw; display: flex; justify-content: space-between; color: #566087; font-size: .78rem; }
+  .ok { color: var(--green); } .warn { color: var(--amber); } .dim { color: var(--dim); }
+  a { color: var(--accent); }
+  .logo { font-weight: 900; font-size: 1.05rem; letter-spacing: .04em; color: var(--accent); }
+  .progress { position: absolute; top: 0; left: 0; height: 4px; background: linear-gradient(90deg,#38bdf8,#34d399); width: 0; transition: width .25s; }
+  .hint { position: absolute; bottom: 2vh; right: 6vw; color: #566087; font-size: .75rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: clamp(.8rem, 1.3vw, 1.02rem); }
+  th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid #22305c; }
+  th { color: var(--accent); text-transform: uppercase; font-size: .75rem; letter-spacing: .1em; }
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="deck" id="deck">
+
+  <section class="slide active">
+    <small class="kicker">Encode Club × Solana Foundation · Solana Hackathon 2026</small>
+    <h1>Verification<span class="grad">Oracle</span></h1>
+    <p class="lead" style="margin-top:1.4rem;">Pay-per-proof event verification for AI agents — x402 micropayments, an on-chain escrow on Solana, and a Truth Receipt with cited evidence.</p>
+    <div class="foot"><span class="logo">verification-oracle</span><span>Encode Club Solana Hackathon 2026 · Best Use of x402</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">The problem</small>
+    <h2>AI agents can't trust facts —<br/>and oracles weren't built for machines.</h2>
+    <p class="lead">Agents moving money need ground truth: <em>did this event happen, by when, per whose declaration?</em> Existing oracles answer once a day, cost too much, or require a human vote. And no agent can pay for five cents of truth.</p>
+    <div class="grid">
+      <div class="kpi"><div class="n">12–24h</div><div class="d">classic optimistic oracle latency</div></div>
+      <div class="kpi"><div class="n">$0.00 vs $0.00005</div><div class="d">why Solana makes sub-cent pay-per-proof rational</div></div>
+      <div class="kpi"><div class="n">0</div><div class="d">trusted machine-payable truth APIs for agents before this</div></div>
+    </div>
+    <div class="foot"><span class="logo">verification-oracle</span><span>02</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">The product</small>
+    <h2>One endpoint. Pay per answer.<br/>A receipt with sources.</h2>
+    <ul class="clean">
+      <li><b>POST /verify</b> — agent asks: <em>"Did example Corp disclose audited revenue by deadline?"</em> + resolution criteria</li>
+      <li><b>402 Payment Required</b> — x402 V2 terms: 0.01 USDC-equivalent, network <code>solana:EtWTR…</code></li>
+      <li><b>Pay on Solana</b> — client deposits into an Anchor escrow PDA; the server verifies the deposit <em>on-chain</em></li>
+      <li><b>Truth Receipt</b> — outcome (YES/NO/UNDECIDED), confidence, evidence URLs, deposit signature, escrow status</li>
+    </ul>
+    <div class="foot"><span class="logo">verification-oracle</span><span>03</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">Live demo flow</small>
+    <h2>The whole loop, on Devnet — right now</h2>
+    <div class="flow">
+      <span class="step">POST /verify</span><span class="arrow">→</span>
+      <span class="step">402 + terms</span><span class="arrow">→</span>
+      <span class="step">deposit → escrow PDA</span><span class="arrow">→</span>
+      <span class="step">attest(signature)</span><span class="arrow">→</span>
+      <span class="step">RPC verify</span><span class="arrow">→</span>
+      <span class="step">TinyFish search → fetch</span><span class="arrow">→</span>
+      <span class="step">Groq gpt-oss-120b</span><span class="arrow">→</span>
+      <span class="step">Truth Receipt</span>
+    </div>
+    <p class="lead" style="margin-top:1.4rem;font-size:.95rem;">A real verification we just ran (2026-11-09, timestamped):</p>
+    <ul class="clean" style="margin-top:.6rem;font-size:.9rem;">
+      <li>Question: <em>"Did Manchester City win the 2023-24 Premier League title?"</em> → <b>YES · 98%</b> · evidence espn.com + bbc.com</li>
+      <li>Deposit <code>3Lbh5aX2YLqAA…</code> · escrow <code>3jmFV5ukmy9…</code> · proof <code>1794203571507</code> · escrow → <b>claimable</b></li>
+      <li>Explorer: <a href="https://explorer.solana.com/tx/3Lbh5aX2YLqAAYTMmezLczFqNxmRPLKScXJCKvQegCbWkKeyS9HCGrxn4wLPuYoygAHYSxd2gDjXqJfJbGp6evLJ?cluster=devnet">devnet tx ↗</a></li>
+    </ul>
+    <div class="foot"><span class="logo">verification-oracle</span><span>04</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">What's on-chain</small>
+    <h2>An escrow that keeps everyone honest</h2>
+    <table>
+      <thead><tr><th>Piece</th><th>Where</th><th>Why it exists</th></tr></thead>
+      <tbody>
+        <tr><td>Anchor escrow program</td><td><code>He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a</code></td><td>SPL Token lock — claimable (YES/NO) or refundable (UNDECIDED)</td></tr>
+        <tr><td>Nonce-seeded escrow PDA</td><td><code>["escrow", depositor, nonce]</code></td><td>One wallet → many concurrent paid verifications</td></tr>
+        <tr><td><code>attest</code> instruction</td><td>signature written into the escrow account</td><td>Settlement is auditable against the exact deposit tx</td></tr>
+        <tr><td>Replay protection</td><td>signature set persisted server-side + on-chain account state</td><td>No double-charging, ever</td></tr>
+        <tr><td>Signing</td><td>Phantom / Solflare — never the server</td><td>No private keys on the box; judges can watch it happen live</td></tr>
+      </tbody>
+    </table>
+    <div class="foot"><span class="logo">verification-oracle</span><span>05</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">The AI pipeline</small>
+    <h2>Grounded answers, not vibes</h2>
+    <ul class="clean">
+      <li><b>TinyFish Search</b> — ranked live web results, allowlisted domains only (bbc / espn / reuters / ap)</li>
+      <li><b>TinyFish Fetch</b> — clean page-text extraction (JS-rendered pages included)</li>
+      <li><b>Groq · openai/gpt-oss-120b</b> — reasons YES/NO/UNDECIDED + confidence from the evidence</li>
+      <li><b>Gemini fallback</b> — automatic on Groq rate-limit</li>
+      <li><b>Confidence &lt; 0.5 ⇒ forced UNDECIDED</b> — the escrow becomes refundable, not claimed</li>
+    </ul>
+    <p class="lead" style="margin-top:1.2rem;font-size:.92rem;">Every receipt ships the cited evidence URLs — judges can click them.</p>
+    <div class="foot"><span class="logo">verification-oracle</span><span>06</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">Why it works on Solana</small>
+    <div class="grid" style="margin-top:0;">
+      <div class="kpi"><div class="n">$0.00005</div><div class="d">fee per deposit — the only chain where micropayments make sense per request</div></div>
+      <div class="kpi"><div class="n">~1s</div><div class="d">finality — verification waits on real consensus, not a block explorer bet</div></div>
+      <div class="kpi"><div class="n">SPL Token</div><div class="d">universal USDT/USDC wallet support, self-hosted escrow logic, no custodial risk</div></div>
+      <div class="kpi"><div class="n">x402 V2</div><div class="d">industry-standard HTTP 402 payment negotiation — no API keys, no invoices, no humans in the loop</div></div>
+    </div>
+    <div class="foot"><span class="logo">verification-oracle</span><span>07</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">Operator side</small>
+    <h2>Settle anything in one signature</h2>
+    <ul class="clean">
+      <li>Dashboard lists <b>one row per deposit transaction</b>: short signature, explorer link, nonce, attested badge</li>
+      <li><b>Batch claim</b> — tick N checkboxes → one transaction, N <code>claim</code> instructions (≤4 per tx, auto-split beyond)</li>
+      <li>Attestation gate: unattested deposits show <b>⚠ attestation pending</b>, claim is hidden, refund stays available</li>
+      <li>Depositor refunds from CLI: <code>npm run refund -- &lt;nonce&gt;</code> — refund never depends on attestation</li>
+    </ul>
+    <div class="foot"><span class="logo">verification-oracle</span><span>08</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">Proof it works</small>
+    <h2>34 unit tests + a real devnet lifecycle</h2>
+    <ul class="clean">
+      <li><b>34/34 unit tests green</b> — RPC-mocked: attestation required, replay rejected, settlement discriminator checks, unattested refusal</li>
+      <li><b>Live devnet run</b> — deposit `3Lbh5aX2…` → attest `5fbgrkjs…` → YES 98% → claimable escrow, receipt includes nonce + attested flag</li>
+      <li><b>Refund path live-tested</b> — deposit `JCZHdvpo…` → attested → refunded `3zaFEcom…`, escrow account closed on-chain</li>
+      <li><b>dUSD</b> self-minted devnet token (Circle faucet is CAPTCHA-gated) — identical deposit code path to USDC</li>
+    </ul>
+    <div class="foot"><span class="logo">verification-oracle</span><span>09</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">What's next</small>
+    <h2>From hackathon to settlement layer</h2>
+    <table>
+      <thead><tr><th>Module</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>Tatum Solana RPC for onchain reads</td><td>spec'd — drop-in <code>SOLANA_RPC_URL</code></td></tr>
+        <tr><td>Walrus Memory Truth Receipts (mainnet, semantic recall)</td><td>in progress — replaces proofs.json</td></tr>
+        <tr><td>Aurora Intents — any-chain funding of x402 deposits</td><td>next iteration (dry-quote on devnet; mainnet dust swap)</td></tr>
+        <tr><td>Nimiq Mini App + PayPal fiat top-up for bot credits</td><td>queued — payment rails, not AI</td></tr>
+      </tbody>
+    </table>
+    <div class="foot"><span class="logo">verification-oracle</span><span>10</span></div>
+  </section>
+
+  <section class="slide">
+    <small class="kicker">Links</small>
+    <h2>Open the repo. Run the demo. Click the explorer.</h2>
+    <ul class="clean">
+      <li>Repo — <a href="https://github.com/Gungz/hackathon-x402-SNANP">github.com/Gungz/hackathon-x402-SNANP</a></li>
+      <li>Live demo — this deployment (dashboard at <code>/</code>)</li>
+      <li>Deck — <code>/presentation.html</code></li>
+      <li>Deposit tx — <a href="https://explorer.solana.com/tx/3Lbh5aX2YLqAAYTMmezLczFqNxmRPLKScXJCKvQegCbWkKeyS9HCGrxn4wLPuYoygAHYSxd2gDjXqJfJbGp6evLJ?cluster=devnet">explorer.solana.com ↗</a></li>
+      <li>Program — <a href="https://explorer.solana.com/address/He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a?cluster=devnet">He1b6Vfh… on Devnet ↗</a></li>
+    </ul>
+    <h1 style="margin-top:2rem;font-size:2rem;">Give agents <span class="grad">receipts</span>,<br/>not vibes.</h1>
+    <div class="foot"><span class="logo">verification-oracle</span><span>Encode Club Solana Hackathon 2026</span></div>
+  </section>
+
+</div>
+<div class="hint">← → or click to navigate · <span id="counter">1 / 11</span></div>
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  let i = 0;
+  const counter = document.getElementById('counter');
+  const bar = document.getElementById('progress');
+  function show(n) {
+    i = (n + slides.length) % slides.length;
+    slides.forEach((s, k) => s.classList.toggle('active', k === i));
+    counter.textContent = (i + 1) + ' / ' + slides.length;
+    bar.style.width = ((i + 1) / slides.length * 100) + '%';
+  }
+  document.getElementById('deck').addEventListener('click', () => show(i + 1));
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ') show(i + 1);
+    if (e.key === 'ArrowLeft') show(i - 1);
+    if (e.key === 'Home') show(0);
+    if (e.key === 'End') show(slides.length - 1);
+  });
+  show(0);
+</script>
+</body>
+</html>

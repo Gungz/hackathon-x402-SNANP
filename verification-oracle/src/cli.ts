@@ -72,8 +72,14 @@ Options:
     console.log(`Amount:     ${result.payment.amount} ${result.payment.asset} on ${result.payment.network}`);
     console.log(`PayTo:      ${result.payment.payTo}`);
     console.log(`Deposit:    ${result.payment.depositTransactionUrl ?? `https://explorer.solana.com/tx/${result.payment.depositSignature}?cluster=devnet`}`);
+    console.log(`Nonce:      ${result.payment.nonce ?? "n/a"} · Attested: ${result.payment.attested === true ? "yes" : "no/unknown"}`);
+    console.log(`Escrow PDA: ${result.payment.escrowPda ?? "n/a"}`);
     if (result.evidence && result.evidence.length > 0) {
-      console.log(`Evidence:   ${result.evidence.map((e: any) => e.source).join(", ")}`);
+      console.log(`Evidence:`);
+      result.evidence.forEach((e: any) => {
+        console.log(`   • ${e.title ?? e.url}`);
+        console.log(`     ${e.url ?? e.source}`);
+      });
     }
     console.log("═════════════════════════════\n");
   } catch (err) {

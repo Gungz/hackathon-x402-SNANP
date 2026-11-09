@@ -37,6 +37,10 @@ export interface PaymentResponse {
   escrowStatus?: "claimable" | "refundable" | string;
   depositSignature?: string;
   depositor?: string | null;
+  escrowPda?: string | null;
+  nonce?: string | null;
+  attested?: boolean;
+  memoryStored?: boolean;
   depositTransactionUrl?: string;
 }
 
@@ -113,7 +117,10 @@ export async function verifyEvent(
     console.log("Depositing to escrow on Solana Devnet…");
 
     const { depositToEscrow } = await import("./deposit-client");
-    const paymentSignature = await depositToEscrow(amount, requirement.asset, requirement.payTo);
+    const deposit = await depositToEscrow(amount, requirement.asset, requirement.payTo);
+    const paymentSignature = deposit.signature;
+    console.log(`Nonce: ${deposit.nonce}`);
+    console.log(`Escrow PDA: ${deposit.escrowPda}`);
     console.log(
       `Deposit transaction: https://explorer.solana.com/tx/${paymentSignature}?cluster=devnet\n`
     );

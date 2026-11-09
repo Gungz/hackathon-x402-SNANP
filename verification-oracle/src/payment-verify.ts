@@ -27,12 +27,26 @@ export interface DepositVerification {
   amount: bigint | null;
   /** Escrow PDA extracted from the deposit instruction — persisted for settlement reconciliation */
   escrowPda?: string | null;
+  /** Client-supplied nonce carried by the deposit instruction (seeds the escrow PDA) */
+  nonce?: bigint | null;
+  /** True when the escrow account records the deposit transaction signature (attest landed) */
+  attested?: boolean;
   reason?: string;
 }
 
 const DEPOSIT_DISCRIMINATOR = Buffer.from([242, 35, 198, 137, 82, 225, 242, 182]);
 const CLAIM_DISCRIMINATOR = Buffer.from([62, 198, 214, 193, 213, 159, 108, 210]);
 const REFUND_DISCRIMINATOR = Buffer.from([2, 96, 183, 251, 63, 208, 46, 46]);
+const ATTEST_DISCRIMINATOR = Buffer.from([83, 148, 120, 119, 144, 139, 117, 160]);
+const ESCROW_ACCOUNT_DISCRIMINATOR = Buffer.from([31, 213, 123, 187, 186, 22, 218, 155]);
+/** Escrow account data length: disc(8) + depositor(32) + beneficiary(32) + amount(8) + claimed(1) + refunded(1) + bump(1) + nonce(8) + signature(64) */
+const ESCROW_ACCOUNT_LEN = 155;
+/** u64 nonce → 8 little-endian bytes (matches Rust's `nonce.to_le_bytes()`) */
+function nonceLeBytes(nonce: bigint | number): Buffer {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(BigInt(nonce));
+  return buf;
+}
 
 /** Normalize an instruction account entry (string or { pubkey }/{ address }) to an address string. */
 function instructionAccountAddresses(ix: any): string[] {
@@ -133,10 +147,14 @@ export interface EscrowState {
   amount: bigint;
   claimed: boolean;
   refunded: boolean;
+  /** Client-supplied nonce that seeds this escrow PDA */
+  nonce: bigint;
+  /** The 64-byte deposit transaction signature recorded by `attest`, or null when unattested */
+  depositTxSignature: Buffer | null;
 }
 
 /**
- * Fetch and decode the escrow account.
+ * Fetch and decode the escrow account (V1 layout, 155 bytes).
  * Returns null if the account is missing, not owned by the escrow program,
  * or has an unexpected layout.
  */
@@ -150,23 +168,24 @@ export async function fetchEscrowState(escrowAddress: string): Promise<EscrowSta
   if (info.value.owner !== ESCROW_PROGRAM_ID) return null;
 
   const data = bufferFromBase64(info.value.data);
-  if (!data || data.length < 83) return null;
+  if (!data || data.length < ESCROW_ACCOUNT_LEN) return null;
+  if (!data.subarray(0, 8).equals(ESCROW_ACCOUNT_DISCRIMINATOR)) return null;
 
-  // Layout: [discriminator(8)] depositor(32) beneficiary(32) amount(8) claimed(1) refunded(1) bump(1)
+  // Layout: [disc(8)] depositor(32) beneficiary(32) amount(8) claimed(1) refunded(1) bump(1) nonce(8) deposit_tx_signature(64)
   const amount = data.readBigUInt64LE(72);
   const claimed = data[80] === 1;
   const refunded = data[81] === 1;
+  const nonce = data.readBigUInt64LE(83);
+  const sigBytes = data.subarray(91, 155);
+  const allZero = sigBytes.every((b: number) => b === 0);
+  const depositTxSignature = allZero ? null : Buffer.from(sigBytes);
 
-  const toBase58 = (start: number) => {
-    const slice = data.subarray(start, start + 32);
-    // minimal base58 for 32 bytes — reuse decoder inverse by returning bytes; caller compares to account ids via raw bytes is overkill.
-    return base58Encode(slice);
-  };
+  const toBase58 = (start: number) => base58Encode(data.subarray(start, start + 32));
 
   const depositor = toBase58(8);
   const beneficiary = toBase58(40);
 
-  return { depositor, beneficiary, amount, claimed, refunded };
+  return { depositor, beneficiary, amount, claimed, refunded, nonce, depositTxSignature };
 }
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -304,6 +323,11 @@ export async function verifyPaymentOnChain(
       reason: `Deposit amount ${amount} does not match expected ${expectedAmountBaseUnits}`,
     };
   }
+  // V1 deposit instruction data: [discriminator(8)] amount(8) nonce(8)
+  if (data.length < 24) {
+    return { ok: false, depositor: feePayer, amount, reason: "Deposit instruction missing nonce (V0 layout?)" };
+  }
+  const nonce = data.readBigUInt64LE(16);
 
   const firstAccount = depositIx.accounts?.[0];
   if (firstAccount && firstAccount !== feePayer) {
@@ -343,21 +367,72 @@ export async function verifyPaymentOnChain(
   if (!escrowPda || !escrowTokenAccount) {
     return { ok: false, depositor: feePayer, amount, reason: "Could not locate escrow accounts in instruction" };
   }
+
+  // Cross-check the escrow PDA (and its token account) really is derived from
+  // the fee payer + the nonce carried by the instruction — the client cannot
+  // point the verification at somebody else's escrow.
+  const expectedEscrowPda = await deriveEscrowPdaAddress(feePayer!, nonce);
+  const expectedEscrowTokenPda = await deriveEscrowTokenPdaAddress(feePayer!, nonce);
+  if (!expectedEscrowPda || expectedEscrowPda !== escrowPda) {
+    return {
+      ok: false,
+      depositor: feePayer,
+      amount,
+      nonce,
+      reason: "Escrow PDA does not match the depositor + nonce from the deposit instruction",
+    };
+  }
+  if (expectedEscrowTokenPda !== escrowTokenAccount) {
+    return {
+      ok: false,
+      depositor: feePayer,
+      amount,
+      nonce,
+      reason: "Escrow token account PDA does not match the depositor + nonce from the deposit instruction",
+    };
+  }
+
   // Cross-check the escrow account state independently
   const escrowState = await fetchEscrowState(escrowPda);
   if (!escrowState) {
-    return { ok: false, depositor: feePayer, amount, reason: "Escrow account missing or not owned by escrow program" };
+    return { ok: false, depositor: feePayer, amount, nonce, reason: "Escrow account missing, wrong layout, or not owned by escrow program" };
   }
   if (escrowState.amount !== amount) {
     return {
       ok: false,
       depositor: feePayer,
       amount,
+      nonce,
       reason: `Escrow amount ${escrowState.amount} does not match deposited amount`,
     };
   }
   if (escrowState.claimed || escrowState.refunded) {
-    return { ok: false, depositor: feePayer, amount, reason: "Escrow already claimed or refunded" };
+    return { ok: false, depositor: feePayer, amount, nonce, reason: "Escrow already claimed or refunded" };
+  }
+
+  // ── Attestation gate (REQUIRED, V1) ──
+  // The escrow account must record exactly this deposit transaction's
+  // signature (written by the `attest` instruction after the deposit
+  // confirmed). Unattested or mismatched ⇒ no verification, nothing settled.
+  const submittedSig = base58ToBuffer(signature);
+  if (!escrowState.depositTxSignature) {
+    return {
+      ok: false,
+      depositor: feePayer,
+      amount,
+      nonce,
+      reason:
+        "attestation_required — the escrow account has no deposit signature. Submit the `attest` instruction with this deposit transaction's signature, then retry",
+    };
+  }
+  if (!submittedSig || !escrowState.depositTxSignature.equals(submittedSig)) {
+    return {
+      ok: false,
+      depositor: feePayer,
+      amount,
+      nonce,
+      reason: "Escrow account records a different (or unattested) deposit signature than the PAYMENT-SIGNATURE",
+    };
   }
 
   // Cross-check the escrow token account holds the tokens and is owned by the escrow PDA
@@ -383,19 +458,41 @@ export async function verifyPaymentOnChain(
     };
   }
 
-  return { ok: true, depositor: feePayer, amount: escrowState.amount, escrowPda };
+  return { ok: true, depositor: feePayer, amount: escrowState.amount, escrowPda, nonce, attested: true };
 }
 
 /**
- * Derive the escrow PDA for a depositor (seeds: ["escrow", depositor]).
+ * Derive the escrow PDA for a depositor. V1 seeds: ["escrow", depositor, nonce_le].
+ * Without a nonce (legacy records from V0) falls back to ["escrow", depositor].
  * Returns null if the depositor address is not a valid 32-byte base58 key.
  */
-export async function deriveEscrowPdaAddress(depositor: string): Promise<string | null> {
+export async function deriveEscrowPdaAddress(depositor: string, nonce?: bigint | number | null): Promise<string | null> {
   try {
     const dep = base58ToBuffer(depositor);
     if (!dep || dep.length !== 32) return null;
+    const seeds: Buffer[] = [Buffer.from("escrow"), dep];
+    if (nonce !== undefined && nonce !== null) seeds.push(nonceLeBytes(nonce));
     const [pda] = await getProgramDerivedAddress({
-      seeds: [Buffer.from("escrow"), dep],
+      seeds,
+      programAddress: ESCROW_PROGRAM_ID as unknown as Address,
+    });
+    return String(pda);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Derive the escrow token-account PDA. V1 seeds: ["escrow-token", depositor, nonce_le].
+ */
+export async function deriveEscrowTokenPdaAddress(depositor: string, nonce?: bigint | number | null): Promise<string | null> {
+  try {
+    const dep = base58ToBuffer(depositor);
+    if (!dep || dep.length !== 32) return null;
+    const seeds: Buffer[] = [Buffer.from("escrow-token"), dep];
+    if (nonce !== undefined && nonce !== null) seeds.push(nonceLeBytes(nonce));
+    const [pda] = await getProgramDerivedAddress({
+      seeds,
       programAddress: ESCROW_PROGRAM_ID as unknown as Address,
     });
     return String(pda);
@@ -437,7 +534,8 @@ export async function verifySettlementOnChain(
   signature: string,
   depositor: string,
   expectedPayTo: string,
-  expectedEscrowPda?: string | null
+  expectedEscrowPda?: string | null,
+  nonce?: bigint | number | null
 ): Promise<SettlementVerification> {
   const result: any = await fetchTransactionWithRetry(signature);
 
@@ -466,7 +564,7 @@ export async function verifySettlementOnChain(
   }
 
   const accounts = instructionAccountAddresses(ix);
-  const escrowPda = expectedEscrowPda ?? (await deriveEscrowPdaAddress(depositor));
+  const escrowPda = expectedEscrowPda ?? (await deriveEscrowPdaAddress(depositor, nonce));
   if (!escrowPda) {
     return { ok: false, reason: "Depositor is not a valid address" };
   }

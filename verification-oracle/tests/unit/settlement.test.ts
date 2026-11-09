@@ -19,7 +19,7 @@ import "./env-setup";
 import { test, describe, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert";
 import type { Server } from "http";
-import { createRpcMock, type MockRpcState } from "./rpc-mock";
+import { createRpcMock, fakeTxSignature, type MockRpcState } from "./rpc-mock";
 import { app } from "../../src/server";
 
 let server: Server;
@@ -50,7 +50,7 @@ describe("claim/refund settlement endpoints", { concurrency: 1 }, () => {
 
   async function seedProof(kind: "claimable" | "refundable"): Promise<string> {
     state.forceYes = kind === "claimable";
-    const sig = `settlement-deposit-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+    const sig = fakeTxSignature(`settlement-deposit-${Date.now()}-${Math.floor(Math.random() * 1e9)}`);
     const res = await fetch(`${baseUrl}/verify`, {
       method: "POST",
       headers: {

@@ -1,6 +1,8 @@
-# VerificationOracle V0
+# VerificationOracle V1
 
 Pay-per-proof event verification API using x402 on **Solana Devnet**, with an **on-chain Anchor escrow program**, **TinyFish** web search and content extraction, and **Groq** LLM reasoning.
+
+V1: escrow is seeded per deposit (`["escrow", depositor, nonce]`) — one wallet can hold many concurrent paid verifications; after the deposit confirms, the client submits an `attest` instruction recording the deposit transaction signature **inside** the escrow (a program cannot read its own signature); **attestation is REQUIRED** before the server verifies anything; settlement (claim/refund) is per deposit transaction; the dashboard supports per-row Claim/Refund and **batch claim** (one transaction with N `claim` instructions, ≤4 per tx).
 
 ## What it does
 
@@ -15,7 +17,10 @@ A `POST /verify` endpoint accepts a question and resolution criteria, negotiates
 ```
 Client SDK ──▶ POST /verify ──▶ 402 Payment Required
                                     │
-                 Client deposits SPL tokens (USDC/USDT/dUSD) to escrow PDA (on-chain)
+                 Client deposits SPL tokens (USDC/USDT/dUSD) to a nonce-seeded
+                 escrow PDA ["escrow", depositor, nonce] (on-chain)
+                                    │
+                 Client submits `attest(depositTxSignature)` — REQUIRED
                                     │
                 Retry with PAYMENT-SIGNATURE (proof of deposit)
                                     │
@@ -31,8 +36,29 @@ Client SDK ──▶ POST /verify ──▶ 402 Payment Required
           Escrow: claimable              Escrow: refundable
                     │                               │
         Operator claims via             Client refunds via
-        dashboard + wallet              dashboard + wallet
+        dashboard + wallet              dashboard/CLI + wallet
 ```
+
+## Deploy (live demo)
+
+The app is a plain Express server — deploy it anywhere Node 24 runs.
+
+**Render (blueprint included — free tier works):**
+
+1. Push this repo (see `render.yaml` at the repo root).
+2. Render → New → Blueprint → select the repo → set the three secret env vars (`TINYFISH_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`) when prompted. `SOLANA_PAY_TO` is the operator wallet's public key; `ESCROW_PROGRAM_ID` and the dUSD mint are pre-filled.
+3. The dashboard goes live at `https://<your-app>.onrender.com/` and the presentation at `https://<your-app>.onrender.com/presentation.html`.
+
+**Important:** never deploy `.env` or `client-keypair.json` — the server never signs; the env on the host is only for the read path (search/fetch/LLM + RPC reads). `.env.example` lists exactly what the host needs.
+
+**Railway / VPS alternative:** same blueprint semantics — `rootDir: verification-oracle`, build `npm install`, start `npm start`.
+
+## How Solana powers this project
+
+- **x402 V2 machine payments on Solana** — a client POSTs `/verify`, gets `402 Payment Required`, and retries with a real, signed Solana transaction as `PAYMENT-SIGNATURE`. Solana's sub-cent fees are what make a fraction-of-a-cent pay-per-proof API economically rational.
+- **Anchor escrow program on Solana Devnet** (`He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a`, SPL Token): the client deposits into a PDA; the oracle runs verification only after the server verifies the deposit on-chain (`getTransaction`: program, deposit discriminator, amount, depositor==fee payer, mint, escrow PDA existence/ownership/amount, escrow token-account authority, replay protection).
+- **Settlement is wallet-signed on Solana**: on YES/NO the escrow is claimable by the operator (claim ix, signed in Phantom/Solflare); on UNDECIDED it is refundable to the client. Funds never move server-side — no private key ever touches the API.
+- **Audit trail**: every response is a Truth Receipt with the deposit signature and an explorer link to the Solana transaction.
 
 ## Quick Start
 
@@ -175,7 +201,7 @@ npm run deploy:escrow
 ## Tests
 
 ```bash
-# Unit tests (RPC/TinyFish/Groq mocked) — 33 tests
+# Unit tests (RPC/TinyFish/Groq mocked) — 34 tests
 npm test
 
 # E2E tests (full server, real API calls) — 3 tests
@@ -188,19 +214,24 @@ npm run test:e2e
 Client (CLI) ──▶ POST /verify ──▶ 402 (x402 V2 payment terms, SPL-token base units, escrow program)
                                       │
                        Client builds + signs Anchor `deposit` transaction
-                       (creates escrow PDA, locks the token in the escrow token account)
+                       (fresh nonce; creates escrow PDA ["escrow", depositor, nonce])
+                                      │
+                       Client submits `attest(depositTxSignature)` — REQUIRED
                                       │
                        Retry with PAYMENT-SIGNATURE = deposit tx signature
                                       │
                                       ▼
                        Server verifies the deposit on-chain via devnet RPC:
                          • invoked program == escrow program
-                         • instruction == `deposit`, data discriminator valid
+                         • instruction == `deposit`, data discriminator valid (24-byte data)
                          • amount matches x402 requirement, depositor == fee payer
                          • token mint present in account keys
+                         • escrow PDA derived from depositor + nonce == instruction's escrow
+                         • escrow token PDA derived the same way == instruction's token account
                          • escrow PDA exists, owned by program, amount matches, not settled
                          • escrow token account holds ≥ amount, authority == escrow PDA
-                         • signature not already spent (replay protection)
+                         • escrow account records THIS deposit's signature (attestation)
+                         • signature not already spent (replay protection, persisted)
                                       │
                     TinyFish Search → TinyFish Fetch → Groq LLM
                                       │
@@ -212,8 +243,8 @@ Client (CLI) ──▶ POST /verify ──▶ 402 (x402 V2 payment terms, SPL-to
                     │                               │
           Escrow: claimable              Escrow: refundable
                     │                               │
-        Operator claims via             Client refunds via
-        dashboard + wallet              dashboard + wallet
+        Operator claims via             Depositor refunds via
+        dashboard + wallet              dashboard/CLI + wallet
 ```
 
 **No wallet funding needed for the AI verification itself — but the deposit is
@@ -222,13 +253,15 @@ without the Circle faucet).**
 
 ### Escrow semantics — read this
 
-- One outstanding escrow **per depositor wallet**: the escrow PDA is seeded
-  `["escrow", depositor]` and uses `init`, so a second parallel deposit from the
-  same wallet **fails on-chain** until the first escrow is claimed or refunded.
+- **Multiple concurrent escrows per wallet** (V1): the escrow PDA is seeded
+  `["escrow", depositor, nonce]` with a fresh client-supplied nonce per deposit.
+  Nonce reuse fails on-chain (`init`); 2+ verifications from one wallet need no waiting.
 - Different depositors can verify in parallel.
 - Funds never merge: `init` cannot deposit into an existing escrow.
-- Production design: seed the escrow with a depositor-supplied nonce
-  (`["escrow", depositor, nonce]`) to support concurrent verifications per wallet.
+- **Attestation is REQUIRED**: after the deposit lands, the client submits
+  `attest` with the deposit transaction signature; the server refuses verification
+  (`402 attestation_required`) until the escrow account records that exact signature.
+- **Refund is per-transaction and depositor-signed only** — an operator cannot refund a client's escrow. Batch claim exists (N claim instructions in one wallet-signed transaction); refund never batches.
 
 ## API
 
@@ -263,11 +296,15 @@ Request:
     "asset": "BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc",
     "refundable": false,
     "escrowStatus": "claimable",
-    "depositSignature": "5u1ZCoT9Gq78EUPNwK9Rqphfqm3JWk8eKmp32t6xcxThGL1x4BtavQUiXG4FF5LqdxRQaG7W72hV3uKMYn7PboG1",
+    "depositSignature": "3Lbh5aX2YLqAAYTMmezLczFqNxmRPLKScXJCKvQegCbWkKeyS9HCGrxn4wLPuYoygAHYSxd2gDjXqJfJbGp6evLJ",
     "depositor": "7bsn4jyj5S23bpdJUhTF949pqj6UrNvQWbavCBWsDtFT",
-    "depositTransactionUrl": "https://explorer.solana.com/tx/5u1Z…?cluster=devnet"
+    "escrowPda": "3jmFV5ukmy9PftMqjsCi53CDkkCWt4Bp9dT538JMoVnU",
+    "nonce": "1794203557881197",
+    "attested": true,
+    "memoryStored": false,
+    "depositTransactionUrl": "https://explorer.solana.com/tx/3Lbh5aX2…?cluster=devnet"
   },
-  "timestamp": "2026-11-08T16:30:46.934Z",
+  "timestamp": "2026-11-09T05:52:51.507Z",
   "escrowStatus": "claimable",
   "llmProvider": "groq",
   "reasoning": "..."
@@ -280,9 +317,14 @@ Returns claimable and refundable escrow records.
 
 ## How claims work
 
-The operator opens the dashboard, connects their Solana wallet, reviews
-pending claims, and signs the `claim` (or `refund`) transaction from the
-browser. No private key ever touches the server.
+The operator opens the dashboard, connects their Solana wallet, reviews one row
+per pending deposit transaction (short signature, explorer link, nonce, attested
+badge), and signs `claim` transactions from the browser — per row, or **batch claim**
+with several checkboxes (one wallet-signed transaction carrying N `claim`
+instructions, ≤4 per transaction). **Refund is depositor-signed only** — the
+depositor refunds via the dashboard (connected as the depositor) or via
+`npm run refund -- <nonce>`; an operator cannot sign a refund. No private key
+ever touches the server.
 
 Settlement bookkeeping is kept honest two ways:
 
@@ -309,9 +351,9 @@ verification-oracle/
 │   ├── server.ts          # Express server, /verify, /escrow/*, payment middleware
 │   ├── client.ts          # x402 payment-aware fetch client
 │   ├── cli.ts             # Agent CLI (--yes approval gate before signing)
-│   ├── deposit-client.ts  # Real devnet deposit builder (v1 tx, estimate limits, confirm)
+│   ├── deposit-client.ts  # Real devnet deposit builder (v1 tx) + attest/refund commands (npm run attest / npm run refund)
+│   ├── payment-verify.ts  # On-chain deposit verification (nonce PDA, token, ATTESTATION gate, replay)
 │   ├── create-demo-token.ts # Self-minted dUSD demo token creator
-│   ├── payment-verify.ts  # On-chain deposit verification (escrow PDA + token checks)
 │   ├── search.ts          # TinyFish Search API
 │   ├── fetch-content.ts   # TinyFish Fetch API
 │   ├── llm-reason.ts      # Groq LLM + Gemini fallback
@@ -323,5 +365,6 @@ verification-oracle/
 ├── tests/{unit,e2e}/      # node:test suites (unit mocks RPC; e2e hits real APIs/devnet)
 ├── scripts/seed.ts        # Demo seed (3 preset verifications)
 ├── demo-token.json        # dUSD mint/ATA record (no secrets)
-└── public/index.html      # Web dashboard
+├── public/index.html      # Web dashboard (per-deposit rows, batch claim, attestation badges)
+└── public/presentation.html  # Encode hackathon slide deck (keyboard-navigable)
 ```

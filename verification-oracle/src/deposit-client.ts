@@ -57,7 +57,14 @@ const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Addres
 const ATA_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" as Address;
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111" as Address;
 const DEPOSIT_DISCRIMINATOR = Buffer.from([242, 35, 198, 137, 82, 225, 242, 182]);
+const ATTEST_DISCRIMINATOR = Buffer.from([83, 148, 120, 119, 144, 139, 117, 160]);
+const REFUND_DISCRIMINATOR = Buffer.from([2, 96, 183, 251, 63, 208, 46, 46]);
 const COMMITMENT = "confirmed" as const;
+
+/** Fresh client-supplied nonce: ms timestamp * 1000 + random 0..999 (fits u64) */
+export function generateNonce(): bigint {
+  return BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+}
 
 const rpc = createSolanaRpc(RPC_URL);
 
@@ -86,33 +93,37 @@ export async function deriveAta(owner: Address, mint: Address) {
 }
 
 /**
- * Derive the escrow PDA for a depositor.
+ * Derive the escrow PDA for a depositor + nonce.
  */
-export async function deriveEscrowPda(depositor: Address) {
+export async function deriveEscrowPda(depositor: Address, nonce: bigint | number) {
+  const nonceBuf = Buffer.alloc(8);
+  nonceBuf.writeBigUInt64LE(BigInt(nonce));
   const [pda] = await getProgramDerivedAddress({
-    seeds: [Buffer.from("escrow"), toBytes(depositor)],
+    seeds: [Buffer.from("escrow"), toBytes(depositor), nonceBuf],
     programAddress: ESCROW_PROGRAM_ID,
   });
   return pda;
 }
 
 /**
- * Derive the escrow token account PDA for a depositor.
+ * Derive the escrow token account PDA for a depositor + nonce.
  */
-export async function deriveEscrowTokenPda(depositor: Address) {
+export async function deriveEscrowTokenPda(depositor: Address, nonce: bigint | number) {
+  const nonceBuf = Buffer.alloc(8);
+  nonceBuf.writeBigUInt64LE(BigInt(nonce));
   const [pda] = await getProgramDerivedAddress({
-    seeds: [Buffer.from("escrow-token"), toBytes(depositor)],
+    seeds: [Buffer.from("escrow-token"), toBytes(depositor), nonceBuf],
     programAddress: ESCROW_PROGRAM_ID,
   });
   return pda;
 }
 
 /**
- * Derive the escrow PDA and token account for a depositor.
+ * Derive the escrow PDA and token account for a depositor + nonce.
  */
-export async function deriveEscrow(depositor: Address) {
-  const escrow = await deriveEscrowPda(depositor);
-  const escrowToken = await deriveEscrowTokenPda(depositor);
+export async function deriveEscrow(depositor: Address, nonce: bigint | number) {
+  const escrow = await deriveEscrowPda(depositor, nonce);
+  const escrowToken = await deriveEscrowTokenPda(depositor, nonce);
   return { escrow, escrowToken };
 }
 
@@ -226,8 +237,22 @@ export async function ensureDepositorAta(mintOverride?: string): Promise<string 
   return sig;
 }
 
+function nonceLeBytes(nonce: bigint | number): Buffer {
+  const nonceBuf = Buffer.alloc(8);
+  nonceBuf.writeBigUInt64LE(BigInt(nonce));
+  return nonceBuf;
+}
+
+function signatureToBytes(signature: string): Buffer {
+  const bytes = Buffer.from(getBase58Encoder().encode(signature as unknown as Address));
+  if (bytes.length !== 64) {
+    throw new Error(`Signature must decode to 64 bytes, got ${bytes.length}`);
+  }
+  return bytes;
+}
+
 /**
- * Build the Anchor `deposit` instruction.
+ * Build the Anchor `deposit` instruction (V1: data = disc + amount + nonce).
  */
 function buildDepositInstruction(
   depositor: Address,
@@ -236,11 +261,12 @@ function buildDepositInstruction(
   depositorToken: Address,
   mint: Address,
   amount: bigint,
-  beneficiary: Address
+  beneficiary: Address,
+  nonce: bigint
 ) {
   const amountBuf = Buffer.alloc(8);
   amountBuf.writeBigUInt64LE(amount);
-  const data = Buffer.concat([DEPOSIT_DISCRIMINATOR, amountBuf]);
+  const data = Buffer.concat([DEPOSIT_DISCRIMINATOR, amountBuf, nonceLeBytes(nonce)]);
 
   return {
     programAddress: ESCROW_PROGRAM_ID,
@@ -259,16 +285,61 @@ function buildDepositInstruction(
 }
 
 /**
- * Perform the real deposit: ensure ATA, then call the escrow `deposit` instruction.
- * `mintAddress`/`beneficiary` override the 402 terms advertised by the server —
- * defaults come from USDC_MINT / SOLANA_PAY_TO for standalone use.
- * Returns the deposit transaction signature (confirmed on-chain).
+ * Build the Anchor `attest` instruction — writes the deposit transaction
+ * signature into the escrow account (required before the server verifies).
+ */
+function buildAttestInstruction(escrow: Address, depositSignature: Buffer) {
+  const data = Buffer.concat([ATTEST_DISCRIMINATOR, depositSignature]);
+  return {
+    programAddress: ESCROW_PROGRAM_ID,
+    accounts: [{ address: escrow, role: AccountRole.WRITABLE }],
+    data,
+  };
+}
+
+/**
+ * Build the Anchor `refund` instruction — returns THIS escrow's tokens to the
+ * depositor. Works regardless of attestation state.
+ */
+function buildRefundInstruction(
+  depositor: Address,
+  escrow: Address,
+  escrowToken: Address,
+  depositorToken: Address
+) {
+  const data = Buffer.from(REFUND_DISCRIMINATOR);
+  return {
+    programAddress: ESCROW_PROGRAM_ID,
+    accounts: [
+      { address: escrow, role: AccountRole.WRITABLE },
+      { address: escrowToken, role: AccountRole.WRITABLE },
+      { address: depositorToken, role: AccountRole.WRITABLE },
+      { address: depositor, role: AccountRole.READONLY_SIGNER },
+      { address: TOKEN_PROGRAM_ID, role: AccountRole.READONLY },
+    ],
+    data,
+  };
+}
+
+/**
+ * Perform the real deposit: ensure ATA, then call the escrow `deposit` instruction
+ * with a fresh client-supplied nonce. `mintAddress`/`beneficiary` override the 402
+ * terms advertised by the server — defaults come from USDC_MINT / SOLANA_PAY_TO
+ * for standalone use.
+ *
+ * After the deposit transaction confirms on-chain, this function ALSO submits the
+ * `attest` instruction with the deposit's transaction signature (attestation is
+ * REQUIRED before the server verifies). If attestation fails, this throws BEFORE
+ * any /verify retry happens and prints recovery instructions.
+ *
+ * Returns the deposit signature (confirmed on-chain), the nonce used, and the
+ * escrow PDA — the caller retries POST /verify with the signature as PAYMENT-SIGNATURE.
  */
 export async function depositToEscrow(
   amountBaseUnits: bigint,
   mintAddress?: string,
   beneficiary?: string
-): Promise<string> {
+): Promise<{ signature: string; nonce: bigint; escrowPda: string }> {
   const { signer, address } = await loadClient();
   const mint = (mintAddress ?? USDC_DEVNET_MINT) as Address;
   const beneficiaryAddress = (beneficiary ?? SOLANA_PAY_TO) as Address;
@@ -277,22 +348,9 @@ export async function depositToEscrow(
   await ensureDepositorAta(mintAddress);
 
   const depositorToken = await deriveAta(address, mint);
-  const { escrow, escrowToken } = await deriveEscrow(address);
-
-  // The deposit instruction uses `init` — a deposit fails if this wallet's
-  // escrow already exists (one outstanding verification per wallet). Check
-  // first so the failure is actionable instead of a cryptic simulation error.
-  const existingEscrow = await rpc
-    .getAccountInfo(escrow, { encoding: "base64", commitment: COMMITMENT })
-    .send();
-  if (existingEscrow.value !== null) {
-    throw new Error(
-      `Depositor escrow PDA ${escrow} already exists on-chain. ` +
-        `This wallet has an outstanding verification — settle it first ` +
-        `(claim from the dashboard if the outcome was YES/NO, or refund if ` +
-        `UNDECIDED) and retry. Check GET /escrow/pending for its proof ID.`
-    );
-  }
+  const nonce = generateNonce();
+  const { escrow, escrowToken } = await deriveEscrow(address, nonce);
+  console.log(`Escrow PDA (nonce ${nonce}): ${escrow}`);
 
   const depositIx = buildDepositInstruction(
     address,
@@ -301,12 +359,53 @@ export async function depositToEscrow(
     depositorToken,
     mint,
     amountBaseUnits,
-    beneficiaryAddress
+    beneficiaryAddress,
+    nonce
   );
 
   const signature = await signSimulateAndSend(signer, depositIx);
   console.log(`Deposited ${amountBaseUnits} base units of ${mint} to escrow (signature: ${signature})`);
-  return signature;
+
+  // ── Attestation (REQUIRED): write the deposit tx signature into the escrow account ──
+  await attestDepositSignature(signature, nonce);
+
+  return { signature, nonce, escrowPda: String(escrow) };
+}
+
+/**
+ * Submit the `attest` instruction recording `depositSignature` (a base58
+ * transaction signature) inside the escrow account for `nonce`.
+ * Exported so a failed attestation can be retried with
+ *   npm run attest -- <depositSignature> <nonce>
+ */
+export async function attestDepositSignature(depositSignature: string, nonce: bigint | number | string): Promise<string> {
+  const { signer, address } = await loadClient();
+  const nonceBig = BigInt(nonce);
+  const escrow = await deriveEscrowPda(address, nonceBig);
+  const sigBytes = signatureToBytes(depositSignature);
+
+  const attestIx = buildAttestInstruction(escrow, sigBytes);
+  const sig = await signSimulateAndSend(signer, attestIx);
+  console.log(`Attestation recorded for escrow ${escrow} (signature: ${sig})`);
+  return sig;
+}
+
+/**
+ * Refund THIS deposit's escrow — signed by the depositor, works regardless of
+ * attestation state. Exported for   npm run refund -- <nonce>
+ */
+export async function refundFromEscrow(nonce: bigint | number | string, mintOverride?: string): Promise<string> {
+  const { signer, address } = await loadClient();
+  const nonceBig = BigInt(nonce);
+  const mint = (mintOverride ?? USDC_DEVNET_MINT) as Address;
+  const escrow = await deriveEscrowPda(address, nonceBig);
+  const escrowToken = await deriveEscrowTokenPda(address, nonceBig);
+  const depositorToken = await deriveAta(address, mint);
+
+  const refundIx = buildRefundInstruction(address, escrow, escrowToken, depositorToken);
+  const sig = await signSimulateAndSend(signer, refundIx);
+  console.log(`Refunded escrow ${escrow} (depositor: ${address}, signature: ${sig})`);
+  return sig;
 }
 
 /**
@@ -349,10 +448,27 @@ if (process.argv[1] && process.argv[1].endsWith("deposit-client.ts")) {
         await ensureDepositorAta();
       } else if (cmd === "deposit") {
         const amount = BigInt(process.argv[3] || "10000"); // default $0.01
-        const sig = await depositToEscrow(amount);
-        console.log("Deposit signature:", sig);
+        const result = await depositToEscrow(amount);
+        console.log("Deposit signature:", result.signature);
+        console.log("Nonce:", result.nonce.toString());
+        console.log("Escrow PDA:", result.escrowPda);
+      } else if (cmd === "attest") {
+        const sig = process.argv[3];
+        const nonce = process.argv[4];
+        if (!sig || !nonce) {
+          throw new Error("Usage: npx tsx src/deposit-client.ts attest <depositSignature> <nonce>");
+        }
+        const attestSig = await attestDepositSignature(sig, nonce);
+        console.log("Attest transaction signature:", attestSig);
+      } else if (cmd === "refund") {
+        const nonce = process.argv[3];
+        if (!nonce) {
+          throw new Error("Usage: npx tsx src/deposit-client.ts refund <nonce>");
+        }
+        const sig = await refundFromEscrow(nonce);
+        console.log("Refund transaction signature:", sig);
       } else {
-        console.log("Usage: npx tsx src/deposit-client.ts [address|balances|create-ata|deposit [amount]]");
+        console.log("Usage: npx tsx src/deposit-client.ts [address|balances|create-ata|deposit [amount]|attest <depositSignature> <nonce>|refund <nonce>]");
       }
     } catch (e) {
       console.error("Error:", (e as Error).message);

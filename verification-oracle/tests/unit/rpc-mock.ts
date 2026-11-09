@@ -1,11 +1,13 @@
 /**
  * Shared mock of the Solana JSON-RPC endpoint.
  *
- * Produces a fully-formed fake deposit that passes verification:
+ * Produces a fully-formed fake V1 deposit that passes verification:
  *   - getTransaction returns an Anchor `deposit` instruction with USDC mint
- *   - getAccountInfo returns the escrow account (owned by escrow program)
+ *     and a client-supplied nonce (escrow PDAs derive from depositor + nonce)
+ *   - getAccountInfo returns the escrow account (owned by escrow program, 155 bytes)
  *   - getTokenAccountBalance returns the expected amount
- *   - fetchEscrowState / fetchTokenAccountBalance read from the same state
+ *   - the escrow account records the submitted signature as its attested
+ *     deposit signature (unless `attested: false` is passed)
  *
  * Call semantics:
  *   - Calls to the test's own Express server (127.0.0.1 / localhost) are
@@ -17,7 +19,8 @@
  */
 
 import { Buffer } from "node:buffer";
-import { base58ToBuffer } from "../../src/payment-verify";
+import { createHash } from "node:crypto";
+import { base58ToBuffer, base58Encode, deriveEscrowPdaAddress, deriveEscrowTokenPdaAddress } from "../../src/payment-verify";
 
 const realFetch = globalThis.fetch;
 
@@ -25,12 +28,22 @@ const ESCROW_PROGRAM_ID = "He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a";
 const USDC_DEVNET_MINT = process.env.USDC_MINT || "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const DEPOSITOR = "6UBWeY293oqa98E5chTJcjZdqwqJL4Y93o56gep2HBMy";
 const BENEFICIARY = "7heA9wh3UMrywyBDwMXPgU8yNkH4uuW1C9EPcXaoGyQB";
-const ESCROW_PDA = "ApDGZBJSqP85gCAt15C2zpucqmd4jSzWw1511ouBYXkm";
-const ESCROW_TOKEN_ACCOUNT = "6Pusj7UVEQHMPKU4g8zLSqok29NmGbW4VKKU7dsAtamy";
 const DEPOSITOR_TOKEN_ACCOUNT = "4sBqwsiH1DFZ5H9nRAGpiA6NpBvH6AHoFEoTEDaE51Z3";
 const AMOUNT = 10_000n;
+const MOCK_NONCE = 12345n;
 const TOKEN_2022_NOT_USED = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
+
+const DEPOSIT_DISCRIMINATOR = Buffer.from([242, 35, 198, 137, 82, 225, 242, 182]);
+const CLAIM_DISCRIMINATOR = Buffer.from([62, 198, 214, 193, 213, 159, 108, 210]);
+const REFUND_DISCRIMINATOR = Buffer.from([2, 96, 183, 251, 63, 208, 46, 46]);
+const ESCROW_ACCOUNT_DISCRIMINATOR = Buffer.from([31, 213, 123, 187, 186, 22, 218, 155]);
+
+/** Deterministic 64-byte base58 "transaction signature" for tests. */
+export function fakeTxSignature(seed: string): string {
+  const digest = createHash("sha256").update(seed).digest();
+  return base58Encode(Buffer.concat([digest, digest]));
+}
 
 export interface MockRpcState {
   depositAmount: bigint;
@@ -44,13 +57,11 @@ export interface MockRpcState {
   forceYes?: boolean;
   /** When true, getAccountInfo for the escrow PDA returns value: null (settled) */
   escrowClosed?: boolean;
+  /** Nonce carried by the deposit instruction; also seeds the mock escrow PDA (default 12345) */
+  nonce?: bigint;
+  /** When false, the escrow account records NO deposit signature (unattested) — default true (attested) */
+  attested?: boolean;
 }
-
-const DEPOSIT_DISCRIMINATOR = Buffer.from([242, 35, 198, 137, 82, 225, 242, 182]);
-const CLAIM_DISCRIMINATOR = Buffer.from([62, 198, 214, 193, 213, 159, 108, 210]);
-const REFUND_DISCRIMINATOR = Buffer.from([2, 96, 183, 251, 63, 208, 46, 46]);
-// Anchor account discriminator for `Escrow` — only the owner/length matter for tests
-const ESCROW_ACCOUNT_DISCRIMINATOR = Buffer.from([124, 49, 231, 13, 77, 213, 89, 67]);
 
 function decodeAddress(address: string): Buffer {
   const buf = base58ToBuffer(address);
@@ -60,10 +71,12 @@ function decodeAddress(address: string): Buffer {
   return buf;
 }
 
-export function buildEscrowAccountData(state: MockRpcState): Buffer {
+export function buildEscrowAccountData(state: MockRpcState, attestedSignature: Buffer | null): Buffer {
   const amount = state.depositAmount;
   const beneficiary = state.beneficiary ?? BENEFICIARY;
-  const buf = Buffer.alloc(8 + 32 + 32 + 8 + 1 + 1 + 1); // 83 bytes, Anchor layout
+  const nonce = state.nonce ?? MOCK_NONCE;
+  // disc(8) + depositor(32) + beneficiary(32) + amount(8) + claimed(1) + refunded(1) + bump(1) + nonce(8) + signature(64)
+  const buf = Buffer.alloc(155);
   ESCROW_ACCOUNT_DISCRIMINATOR.copy(buf, 0);
   decodeAddress(DEPOSITOR).copy(buf, 8);
   decodeAddress(beneficiary).copy(buf, 40);
@@ -71,20 +84,29 @@ export function buildEscrowAccountData(state: MockRpcState): Buffer {
   buf[80] = 0; // claimed
   buf[81] = 0; // refunded
   buf[82] = 253; // bump
+  buf.writeBigUInt64LE(nonce, 83);
+  if (state.attested !== false && attestedSignature && attestedSignature.length === 64) {
+    attestedSignature.copy(buf, 91);
+  } else {
+    buf.fill(0, 91, 155);
+  }
   return buf;
 }
 
-function buildTokenAccountData(state: MockRpcState): Buffer {
+function buildTokenAccountData(state: MockRpcState, escrowPdaBytes: Buffer): Buffer {
   // SPL Token account: mint(32) | authority(32) | amount(8) | ... (only first 72 bytes matter)
   const buf = Buffer.alloc(72);
   decodeAddress(USDC_DEVNET_MINT).copy(buf, 0);
-  decodeAddress(ESCROW_PDA).copy(buf, 32);
+  escrowPdaBytes.copy(buf, 32); // authority == escrow PDA
   buf.writeBigUInt64LE(state.depositAmount, 64);
   return buf;
 }
 
-export function buildMockTransaction(state: MockRpcState) {
+export async function buildMockTransaction(state: MockRpcState) {
   const beneficiary = state.beneficiary ?? BENEFICIARY;
+  const nonce = state.nonce ?? MOCK_NONCE;
+  const escrowPda = (await deriveEscrowPdaAddress(DEPOSITOR, nonce))!;
+  const escrowTokenPda = (await deriveEscrowTokenPdaAddress(DEPOSITOR, nonce))!;
   const dataB64 = Buffer.concat([
     DEPOSIT_DISCRIMINATOR,
     (() => {
@@ -92,13 +114,18 @@ export function buildMockTransaction(state: MockRpcState) {
       a.writeBigUInt64LE(state.depositAmount);
       return a;
     })(),
+    (() => {
+      const n = Buffer.alloc(8);
+      n.writeBigUInt64LE(nonce);
+      return n;
+    })(),
   ]).toString("base64");
 
   const accounts = [
     DEPOSITOR,
     beneficiary,
-    ESCROW_PDA,
-    ESCROW_TOKEN_ACCOUNT,
+    escrowPda,
+    escrowTokenPda,
     DEPOSITOR_TOKEN_ACCOUNT,
     USDC_DEVNET_MINT,
     TOKEN_2022_NOT_USED,
@@ -109,8 +136,8 @@ export function buildMockTransaction(state: MockRpcState) {
     accountKeys: [
       { pubkey: DEPOSITOR },
       { pubkey: beneficiary },
-      { pubkey: ESCROW_PDA },
-      { pubkey: ESCROW_TOKEN_ACCOUNT },
+      { pubkey: escrowPda },
+      { pubkey: escrowTokenPda },
       { pubkey: DEPOSITOR_TOKEN_ACCOUNT },
       { pubkey: USDC_DEVNET_MINT },
       { pubkey: ESCROW_PROGRAM_ID },
@@ -158,7 +185,7 @@ export function buildMockTransaction(state: MockRpcState) {
  * string used by the settlement tests (mock-claim-*, mock-refund-*,
  * mock-wrongclaimsigner-*). Claim signer = BENEFICIARY, refund signer = DEPOSITOR.
  */
-export function buildMockSettlementTransaction(signature: string) {
+export async function buildMockSettlementTransaction(signature: string) {
   const isClaim =
     signature.startsWith("mock-claim-") || signature.startsWith("mock-wrongclaimsigner-");
   const signer = signature.startsWith("mock-wrongclaimsigner-")
@@ -167,10 +194,14 @@ export function buildMockSettlementTransaction(signature: string) {
       ? BENEFICIARY
       : DEPOSITOR;
 
+  const nonce = MOCK_NONCE;
+  const escrowPda = (await deriveEscrowPdaAddress(DEPOSITOR, nonce))!;
+  const escrowTokenPda = (await deriveEscrowTokenPdaAddress(DEPOSITOR, nonce))!;
+
   const discriminator = isClaim ? CLAIM_DISCRIMINATOR : REFUND_DISCRIMINATOR;
   const accounts = [
-    ESCROW_PDA,
-    ESCROW_TOKEN_ACCOUNT,
+    escrowPda,
+    escrowTokenPda,
     DEPOSITOR_TOKEN_ACCOUNT,
     signer,
     TOKEN_2022_NOT_USED,
@@ -183,7 +214,7 @@ export function buildMockSettlementTransaction(signature: string) {
         message: {
           accountKeys: [
             { pubkey: signer },
-            { pubkey: ESCROW_PDA },
+            { pubkey: escrowPda },
             { pubkey: USDC_DEVNET_MINT },
           ],
           instructions: [
@@ -204,6 +235,10 @@ export function buildMockSettlementTransaction(signature: string) {
  * Returns a function matching (url, init?) => Promise<Response>.
  */
 export function createRpcMock(state: MockRpcState) {
+  // The signature under verification — the mock escrow account attests with
+  // exactly these bytes so the attestation gate can pass deterministically.
+  let lastSignature: Buffer | null = null;
+
   return async (url: any, init?: any): Promise<any> => {
     const urlString = String(url);
 
@@ -225,6 +260,10 @@ export function createRpcMock(state: MockRpcState) {
     }
     const method: string = body?.method ?? "";
 
+    const nonce = state.nonce ?? MOCK_NONCE;
+    const escrowPda = (await deriveEscrowPdaAddress(DEPOSITOR, nonce))!;
+    const escrowTokenPda = (await deriveEscrowTokenPdaAddress(DEPOSITOR, nonce))!;
+
     // Deterministic YES for the LLM reasoning step (settlement tests)
     if (
       state.forceYes &&
@@ -242,12 +281,13 @@ export function createRpcMock(state: MockRpcState) {
 
     if (method === "getTransaction") {
       const sig = typeof body?.params?.[0] === "string" ? body.params[0] : "";
+      lastSignature = base58ToBuffer(sig);
       if (
         sig.startsWith("mock-claim-") ||
         sig.startsWith("mock-refund-") ||
         sig.startsWith("mock-wrongclaimsigner-")
       ) {
-        return new Response(JSON.stringify(buildMockSettlementTransaction(sig)), {
+        return new Response(JSON.stringify(await buildMockSettlementTransaction(sig)), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -258,7 +298,7 @@ export function createRpcMock(state: MockRpcState) {
           headers: { "Content-Type": "application/json" },
         });
       }
-      return new Response(JSON.stringify(buildMockTransaction(state)), {
+      return new Response(JSON.stringify(await buildMockTransaction(state)), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -266,7 +306,7 @@ export function createRpcMock(state: MockRpcState) {
     if (method === "getAccountInfo") {
       const params = body?.params ?? [];
       const address = typeof params[0] === "string" ? params[0] : params[0]?.pubkey;
-      if (address === ESCROW_PDA) {
+      if (address === escrowPda) {
         if (state.escrowClosed) {
           // Settled — escrow account is closed on-chain
           return new Response(
@@ -280,21 +320,21 @@ export function createRpcMock(state: MockRpcState) {
               context: { slot: 1 },
               value: {
                 owner: ESCROW_PROGRAM_ID,
-                data: [buildEscrowAccountData(state).toString("base64"), "base64"],
+                data: [buildEscrowAccountData(state, lastSignature).toString("base64"), "base64"],
               },
             },
           }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }
-      if (address === ESCROW_TOKEN_ACCOUNT) {
+      if (address === escrowTokenPda) {
         return new Response(
           JSON.stringify({
             result: {
               context: { slot: 1 },
               value: {
                 owner: TOKEN_2022_NOT_USED,
-                data: [buildTokenAccountData(state).toString("base64"), "base64"],
+                data: [buildTokenAccountData(state, decodeAddress(escrowPda)).toString("base64"), "base64"],
               },
             },
           }),
@@ -327,8 +367,7 @@ export function createRpcMock(state: MockRpcState) {
 export const MOCK_ADDRESSES = {
   DEPOSITOR,
   BENEFICIARY,
-  ESCROW_PDA,
-  ESCROW_TOKEN_ACCOUNT,
   DEPOSITOR_TOKEN_ACCOUNT,
   AMOUNT,
+  MOCK_NONCE,
 };

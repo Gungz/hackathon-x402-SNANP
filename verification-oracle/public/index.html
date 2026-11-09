@@ -13,7 +13,7 @@
       line-height: 1.6;
       padding: 2rem 1rem;
     }
-    .container { max-width: 860px; margin: 0 auto; }
+    .container { max-width: 900px; margin: 0 auto; }
     header { margin-bottom: 1.5rem; }
     h1 { font-size: 1.5rem; }
     .subtitle { color: #666; font-size: 0.9rem; }
@@ -49,10 +49,13 @@
     button:disabled { background: #9ca3af; cursor: not-allowed; }
     button.secondary { background: #374151; }
     button.secondary:hover { background: #111827; }
+    button.danger { background: #dc2626; }
+    button.danger:hover { background: #b91c1c; }
     .row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; word-break: break-all; }
     .muted { color: #666; font-size: 0.8rem; }
     .proof-item { border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem; }
+    .proof-item.unattested { border-color: #f59e0b; background: #fffbeb; }
     .outcome { font-weight: 700; text-transform: uppercase; font-size: 0.8rem; }
     .outcome.yes { color: #16a34a; }
     .outcome.no { color: #dc2626; }
@@ -60,12 +63,17 @@
     .pill { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.72rem; background: #eef2ff; color: #4338ca; }
     .pill.refundable { background: #fffbeb; color: #b45309; }
     .pill.claimable { background: #ecfdf5; color: #047857; }
+    .pill.attested { background: #ecfdf5; color: #047857; }
+    .pill.pending { background: #fef3c7; color: #b45309; }
     .status-line { font-size: 0.85rem; margin: 0.5rem 0 0.75rem; }
     .ok { color: #047857; }
     .err { color: #b91c1c; }
-    .claim-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    .claim-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
     .empty { color: #777; font-size: 0.9rem; }
     code { background: #f3f4f6; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    .batch-bar { display:flex; align-items:center; gap:0.75rem; margin: 0.5rem 0; padding: 0.5rem 0.75rem; background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; }
+    input[type="checkbox"] { width: 1.1rem; height: 1.1rem; cursor: pointer; }
+    a { color: #0284c7; }
   </style>
 </head>
 <body>
@@ -94,7 +102,7 @@
         </div>
         <button type="submit">Verify Event</button>
         <div class="muted" style="margin-top: 0.4rem;">
-          Requires a wallet-approved 0.01 dUSD deposit — connect your wallet in section 2 first, or run the CLI:
+          Requires a wallet-approved 0.01 dUSD deposit — connect your wallet in section 2 first, or use the CLI:
           <code>npm run verify -- --question "…" --criteria "…"</code>
         </div>
       </form>
@@ -103,13 +111,18 @@
 
     <div class="card">
       <div class="row">
-        <h2>2. Operator — Escrow Claims</h2>
+        <h2>2. Operator — Escrow Settlement</h2>
         <button id="connectWalletBtn" class="secondary">Connect Wallet</button>
       </div>
-      <div id="walletStatus" class="status-line muted">Not connected. Phantom or Solflare required to claim from escrow.</div>
+      <div id="walletStatus" class="status-line muted">Not connected. Phantom or Solflare required to claim / refund from escrow.</div>
       <div class="row" style="margin: 0.5rem 0;">
-        <span class="muted">Pending escrow (claimable + refundable)</span>
+        <span class="muted">Pending escrows — one row per deposit transaction</span>
         <button id="refreshPendingBtn" class="secondary" style="padding: 0.3rem 0.6rem; font-size: 0.75rem;">Refresh</button>
+      </div>
+      <div id="batchBar" class="batch-bar" style="display:none;">
+        <strong>Claim selected</strong> (<span id="batchCount">0</span>)
+        <button id="claimSelectedBtn">Claim selected</button>
+        <span class="muted">one transaction, N claim instructions (≤4 per tx)</span>
       </div>
       <div id="pendingClaims" class="empty">No pending escrow records yet — run a verification first.</div>
       <div id="escrowTxStatus" class="status-line"></div>
@@ -118,12 +131,27 @@
     <div class="card">
       <h2>How the escrow works</h2>
       <p class="muted" style="font-size: 0.85rem;">
-        Client deposits dUSD into the on-chain escrow PDA → oracle verifies → YES/NO releases to the operator on claim;
-        UNDECIDED refunds the client. The operator (this dashboard) signs <code>claim</code> / <code>refund</code> transactions
-        with their own wallet — the server never holds a private key.
+        Client deposits dUSD into the on-chain escrow PDA (seeded by depositor + a fresh nonce per
+        deposit — one wallet can hold many concurrent verifications). The oracle verifies → YES/NO
+        marks the escrow <em>claimable</em> (operator claims); UNDECIDED marks it <em>refundable</em>
+        (the depositor refunds). The server never holds a private key — every movement is signed in a wallet.
+      </p>
+      <p class="muted" style="font-size: 0.85rem; margin-top: 0.5rem;">
+        <strong>Attestation is required.</strong> After the deposit lands, the client submits an
+        <code>attest</code> instruction writing the deposit transaction's signature into the escrow account
+        (a program cannot see its own transaction's signature during execution). The server refuses
+        verification — and the dashboard hides Claim — for unattested deposits. The depositor's
+        refund works regardless.
       </p>
       <p class="muted" style="font-size: 0.85rem; margin-top: 0.5rem;">
         Program ID: <code>He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a</code> (Devnet)
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Presentation</h2>
+      <p class="muted" style="font-size: 0.85rem;">
+        Slide deck for judges: <a href="/presentation.html" target="_blank">/presentation.html</a>
       </p>
     </div>
   </div>
@@ -136,28 +164,30 @@
       Transaction,
       TransactionInstruction,
       SystemProgram,
-      LAMPORTS_PER_SOL,
     } from "https://esm.sh/@solana/web3.js@1.98.2";
     import { getAssociatedTokenAddress } from "https://esm.sh/@solana/spl-token@0.4.9";
+    import bs58 from "https://esm.sh/bs58@5.0.0";
 
-    // Escrow program configuration (from Anchor IDL)
+    // Escrow program configuration (from Anchor IDL — program id unchanged in V1)
     const PROGRAM_ID = new PublicKey("He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a");
     const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
-    // Self-minted devnet demo token (dUSD) — Circle's USDC faucet is CAPTCHA-gated,
-    // so the demo token acts as the USDC stand-in (same SPL Token program, same path).
+    // Self-minted devnet demo token (dUSD)
     const DEMO_TOKEN_MINT = new PublicKey("BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc");
     const CLAIM_DISC = new Uint8Array([62, 198, 214, 193, 213, 159, 108, 210]);
     const REFUND_DISC = new Uint8Array([2, 96, 183, 251, 63, 208, 46, 46]);
     const DEPOSIT_DISC = new Uint8Array([242, 35, 198, 137, 82, 225, 242, 182]);
+    const ATTEST_DISC = new Uint8Array([83, 148, 120, 119, 144, 139, 117, 160]);
     // Oracle operator wallet (receives escrow claims). Matches SOLANA_PAY_TO in .env — public key, safe to embed.
     const SOLANA_PAY_TO = new PublicKey("6UBWeY293oqa98E5chTJcjZdqwqJL4Y93o56gep2HBMy");
     const AMOUNT_BASE_UNITS = 10_000n; // $0.01 dUSD
+    const MAX_CLAIMS_PER_TX = 4; // tx-size safety cap for batch claim
 
     const API = window.location.origin;
     const connection = new Connection("https://api.devnet.solana.com", "confirmed");
 
     let provider = null;
     let connectedWallet = null;
+    let pendingCache = [];
 
     function byId(id) { return document.getElementById(id); }
     function setWalletStatus(msg, kind) {
@@ -168,8 +198,16 @@
     function setEscrowTx(msg, kind) {
       const el = byId("escrowTxStatus");
       el.textContent = msg;
-      el.className = "status-line " + (kind === "ok" ? "ok" : "err");
+      el.className = "status-line " + (kind === "ok" ? "ok" : kind === "err" ? "err" : "");
     }
+    function short(s, head = 6, tail = 4) {
+      if (!s) return "—";
+      return s.length > head + tail + 3 ? `${s.slice(0, head)}…${s.slice(-tail)}` : s;
+    }
+    function explorerTx(sig) {
+      return `https://explorer.solana.com/tx/${sig}?cluster=devnet`;
+    }
+    function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
     // ── Wallet connection ──
     function findWallet() {
@@ -189,6 +227,7 @@
         connectedWallet = res?.publicKey ?? provider.publicKey;
         setWalletStatus(`Connected: ${connectedWallet.toBase58().slice(0, 4)}...${connectedWallet.toBase58().slice(-4)}`, "ok");
         byId("connectWalletBtn").textContent = "Reconnect";
+        await refreshPending();
       } catch (err) {
         setWalletStatus("Wallet connection rejected: " + (err.message || err), "err");
       }
@@ -225,18 +264,39 @@
             return;
           }
 
-          byId("verifyResult").innerHTML = "<p class='muted' style='margin-top:0.5rem;'>Depositing 0.01 dUSD to the escrow (approve in your wallet)…</p>";
-          const depositTx = await buildDepositTx();
+          byId("verifyResult").innerHTML = "<p class='muted' style='margin-top:0.5rem;'>Depositing 0.01 dUSD (approve in wallet)…</p>";
+          const nonce = generateNonce();
+          const depositTx = await buildDepositTx(nonce);
           setEscrowTx("Awaiting wallet approval for deposit…");
           const signed = await provider.signAndSendTransaction(depositTx);
           const sig = signed.signature;
-          setEscrowTx(`Deposit submitted: ${sig.slice(0, 8)}… waiting for confirmation…`);
+          setEscrowTx(`Deposit submitted: ${short(sig, 8, 4)}… confirming…`);
 
           try {
             await connection.confirmTransaction(sig, "confirmed");
-            setEscrowTx(`Deposit confirmed: https://explorer.solana.com/tx/${sig}?cluster=devnet`, "ok");
+            setEscrowTx(`Deposit confirmed: ${explorerTx(sig)}`, "ok");
           } catch (confErr) {
             setEscrowTx(`Deposit submitted but unconfirmed: ${sig} (${confErr.message || confErr})`, "err");
+          }
+
+          // ── Attestation (REQUIRED) ──
+          byId("verifyResult").innerHTML = "<p class='muted' style='margin-top:0.5rem;'>Attesting deposit on-chain (approve in wallet)…</p>";
+          try {
+            const attestTx = await buildAttestTx(sig, nonce);
+            setEscrowTx("Awaiting wallet approval for attestation…");
+            const attestSent = await provider.signAndSendTransaction(attestTx);
+            const attestSig = attestSent.signature;
+            await connection.confirmTransaction(attestSig, "confirmed");
+            setEscrowTx(`Attested: ${explorerTx(attestSig)}`, "ok");
+          } catch (attErr) {
+            setEscrowTx(
+              `Attestation failed: ${attErr.message || attErr}. Deposit signature: ${sig} · nonce: ${nonce}. ` +
+              `Recover with: npm run attest -- ${sig} ${nonce}`,
+              "err"
+            );
+            byId("verifyResult").innerHTML = `<p class="err" style="margin-top:0.5rem;">Deposit confirmed but attestation failed — no verification will run. Fix with <code>npm run attest -- ${sig} ${nonce}</code>, then retry.</p>`;
+            await refreshPending();
+            return;
           }
 
           const res2 = await fetch(`${API}/verify`, {
@@ -258,8 +318,9 @@
             </div>
             <div class="muted" style="margin: 0.4rem 0;">${question}</div>
             <div class="muted">Confidence: ${Math.round((result.confidence || 0) * 100)}% · LLM: ${result.llmProvider || "groq"} · Proof: <code>${result.proofId}</code></div>
+            ${result.payment?.escrowPda ? `<div class="muted">Escrow PDA: <code>${result.payment.escrowPda}</code> · Nonce: <code>${result.payment.nonce}</code></div>` : ""}
             ${result.reasoning ? `<div class="muted" style="margin-top:0.4rem; font-style: italic;">${result.reasoning}</div>` : ""}
-            ${Array.isArray(result.evidence) && result.evidence.length > 0 ? `<div class="muted" style="margin-top:0.4rem;">Sources: ${result.evidence.map(e => e.source).join(", ")}</div>` : ""}
+            ${Array.isArray(result.evidence) && result.evidence.length > 0 ? `<div class="muted" style="margin-top:0.4rem;">Evidence:<ul style="margin-left:1.1rem;">${result.evidence.map(e => `<li><a href="${e.url}" target="_blank" rel="noopener noreferrer">${(e.title || e.url || "source").replace(/[<>&"']/g, "")}</a><br/><span class="mono" style="font-size:0.72rem;">${e.url || ""}</span></li>`).join("")}</ul></div>` : ""}
           </div>`;
         await refreshPending();
       } catch (err) {
@@ -267,25 +328,31 @@
       }
     });
 
-    // ── PDA derivation ──
-    function escrowPda(depositor) {
-      return PublicKey.findProgramAddressSync(
-        [new TextEncoder().encode("escrow"), depositor.toBytes()],
-        PROGRAM_ID
-      )[0];
+    // ── PDA + nonce helpers ──
+    function u64le(n) {
+      const buf = new Uint8Array(8);
+      new DataView(buf.buffer).setBigUint64(0, BigInt(n), true);
+      return buf;
     }
-    function escrowTokenPda(depositor) {
-      return PublicKey.findProgramAddressSync(
-        [new TextEncoder().encode("escrow-token"), depositor.toBytes()],
-        PROGRAM_ID
-      )[0];
+    function generateNonce() {
+      return BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    }
+    function escrowPda(depositor, nonce) {
+      const seeds = [new TextEncoder().encode("escrow"), depositor.toBytes()];
+      if (nonce !== undefined && nonce !== null) seeds.push(u64le(nonce));
+      return PublicKey.findProgramAddressSync(seeds, PROGRAM_ID)[0];
+    }
+    function escrowTokenPda(depositor, nonce) {
+      const seeds = [new TextEncoder().encode("escrow-token"), depositor.toBytes()];
+      if (nonce !== undefined && nonce !== null) seeds.push(u64le(nonce));
+      return PublicKey.findProgramAddressSync(seeds, PROGRAM_ID)[0];
     }
 
-    // ── Deposit client (pays into escrow, then verification proceeds) ──
-    async function buildDepositTx() {
+    // ── Deposit client (pays into escrow, then attests, then verification proceeds) ──
+    async function buildDepositTx(nonce) {
       const depositor = connectedWallet;
-      const escrow = escrowPda(depositor);
-      const escrowToken = escrowTokenPda(depositor);
+      const escrow = escrowPda(depositor, nonce);
+      const escrowToken = escrowTokenPda(depositor, nonce);
       const depositorToken = await getAssociatedTokenAddress(
         DEMO_TOKEN_MINT,
         depositor,
@@ -293,9 +360,10 @@
         TOKEN_PROGRAM_ID,
       );
 
-      const data = new Uint8Array(16);
+      const data = new Uint8Array(24);
       data.set(DEPOSIT_DISC, 0);
       new DataView(data.buffer).setBigUint64(8, AMOUNT_BASE_UNITS, true);
+      data.set(u64le(nonce), 16);
 
       const keys = [
         { pubkey: depositor, isSigner: true, isWritable: true },
@@ -308,12 +376,7 @@
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       ];
 
-      const ix = new TransactionInstruction({
-        programId: PROGRAM_ID,
-        keys,
-        data,
-      });
-
+      const ix = new TransactionInstruction({ programId: PROGRAM_ID, keys, data });
       const tx = new Transaction().add(ix);
       tx.feePayer = depositor;
       const { blockhash } = await connection.getLatestBlockhash();
@@ -321,32 +384,37 @@
       return tx;
     }
 
-    async function buildClaimOrRefundTx(record, kind) {
+    async function buildAttestTx(depositSignatureString, nonce) {
+      const escrow = escrowPda(connectedWallet, nonce);
+      const sigBytes = bs58.decode(depositSignatureString);
+      const data = new Uint8Array(8 + 64);
+      data.set(ATTEST_DISC, 0);
+      data.set(sigBytes, 8);
+
+      const keys = [{ pubkey: escrow, isSigner: false, isWritable: true }];
+      const ix = new TransactionInstruction({ programId: PROGRAM_ID, keys, data });
+      const tx = new Transaction().add(ix);
+      tx.feePayer = connectedWallet;
+      const { blockhash } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      return tx;
+    }
+
+    async function buildClaimOrRefundTx(record, kind, signerOverride) {
       const depositor = new PublicKey(record.depositor || record.clientWallet);
-      const escrow = escrowPda(depositor);
-      const escrowToken = escrowTokenPda(depositor);
-      const mint = DEMO_TOKEN_MINT; // dUSD demo token — created by the client keypair for this hackathon
+      const nonce = record.nonce ?? null;
+      const escrow = escrowPda(depositor, nonce);
+      const escrowToken = escrowTokenPda(depositor, nonce);
+      const mint = DEMO_TOKEN_MINT;
 
-      const beneficiaryToken = await getAssociatedTokenAddress(
-        mint,
-        connectedWallet,
-        false,
-        TOKEN_PROGRAM_ID,
-      );
+      const depositorToken = await getAssociatedTokenAddress(mint, depositor, false, TOKEN_PROGRAM_ID);
 
-      const depositorToken = await getAssociatedTokenAddress(
-        mint,
-        depositor,
-        false,
-        TOKEN_PROGRAM_ID,
-      );
-
-      const disc = kind === "claim" ? CLAIM_DISC : REFUND_DISC;
       const data = new Uint8Array(8);
-      data.set(disc, 0);
+      data.set(kind === "claim" ? CLAIM_DISC : REFUND_DISC, 0);
 
       let keys;
       if (kind === "claim") {
+        const beneficiaryToken = await getAssociatedTokenAddress(mint, connectedWallet, false, TOKEN_PROGRAM_ID);
         keys = [
           { pubkey: escrow, isSigner: false, isWritable: true },
           { pubkey: escrowToken, isSigner: false, isWritable: true },
@@ -364,12 +432,7 @@
         ];
       }
 
-      const ix = new TransactionInstruction({
-        programId: PROGRAM_ID,
-        keys,
-        data,
-      });
-
+      const ix = new TransactionInstruction({ programId: PROGRAM_ID, keys, data });
       const tx = new Transaction().add(ix);
       tx.feePayer = connectedWallet;
       const { blockhash } = await connection.getLatestBlockhash();
@@ -377,17 +440,67 @@
       return tx;
     }
 
-    async function sendAndConfirm(tx) {
+    async function buildBatchClaimTx(records) {
+      const mint = DEMO_TOKEN_MINT;
+      const beneficiaryToken = await getAssociatedTokenAddress(mint, connectedWallet, false, TOKEN_PROGRAM_ID);
+      const { blockhash } = await connection.getLatestBlockhash();
+
+      const tx = new Transaction();
+      tx.feePayer = connectedWallet;
+      tx.recentBlockhash = blockhash;
+
+      for (const record of records) {
+        const depositor = new PublicKey(record.depositor || record.clientWallet);
+        const nonce = record.nonce ?? null;
+        const escrow = escrowPda(depositor, nonce);
+        const escrowToken = escrowTokenPda(depositor, nonce);
+        const data = new Uint8Array(8);
+        data.set(CLAIM_DISC, 0);
+        tx.add(new TransactionInstruction({
+          programId: PROGRAM_ID,
+          keys: [
+            { pubkey: escrow, isSigner: false, isWritable: true },
+            { pubkey: escrowToken, isSigner: false, isWritable: true },
+            { pubkey: beneficiaryToken, isSigner: false, isWritable: true },
+            { pubkey: connectedWallet, isSigner: true, isWritable: false },
+            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          ],
+          data,
+        }));
+      }
+      return tx;
+    }
+
+    async function sendAndConfirm(tx, label) {
+      // blockhash must be set before signing for hand-built txs
+      if (!tx.recentBlockhash) {
+        const { blockhash } = await connection.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+      }
       const signed = await provider.signAndSendTransaction(tx);
       const sig = signed.signature;
-      setEscrowTx(`Submitted ${tx.instructions[0].programId.equals(PROGRAM_ID) ? "" : ""}tx ${sig.slice(0, 8)}… waiting confirmation…`);
+      setEscrowTx(`${label ?? "tx"} submitted: ${short(sig, 8, 4)}… waiting confirmation…`);
       try {
         await connection.confirmTransaction(sig, "confirmed");
-        setEscrowTx(`Confirmed: ${sig}`, "ok");
+        setEscrowTx(`${label ?? "tx"} confirmed: ${explorerTx(sig)}`, "ok");
       } catch (err) {
-        setEscrowTx(`Submitted but unconfirmed: ${sig} (${err.message || err})`, "err");
+        setEscrowTx(`${label ?? "tx"} submitted but unconfirmed: ${sig} (${err.message || err})`, "err");
       }
       return sig;
+    }
+
+    async function reportSettlementsToServer(kind, results) {
+      for (const r of results) {
+        try {
+          await fetch(`${API}/escrow/${r.proofId}/${kind}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ signature: r.signature }),
+          });
+        } catch (err) {
+          console.error(`Failed to report ${kind} settlement for ${r.proofId}:`, err);
+        }
+      }
     }
 
     async function claimOrRefund(record, kind) {
@@ -398,49 +511,116 @@
       try {
         setEscrowTx(`Building ${kind} transaction…`);
         const tx = await buildClaimOrRefundTx(record, kind);
-        await sendAndConfirm(tx);
+        const sig = await sendAndConfirm(tx, kind);
+        // Reconcile server bookkeeping — best effort
+        await fetch(`${API}/escrow/${record.proofId}/${kind}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ signature: sig }),
+        }).catch(() => {});
         await refreshPending();
       } catch (err) {
         setEscrowTx(`${kind} failed: ${err.message || err}`, "err");
       }
     }
 
-    // ── Pending Claims panel ──
+    // ── Pending escrows panel ──
+    function selectedRecords() {
+      const checked = [...document.querySelectorAll(".claim-check:checked")].map(el => el.getAttribute("data-id"));
+      return pendingCache.filter(r => checked.includes(r.proofId));
+    }
+
+    function updateBatchBar() {
+      const n = selectedRecords().length;
+      byId("batchCount").textContent = String(n);
+      byId("batchBar").style.display = n > 0 ? "flex" : "none";
+      byId("claimSelectedBtn").disabled = n === 0;
+    }
+
     async function refreshPending() {
       const res = await fetch(`${API}/escrow/pending`);
       const data = await res.json();
+      pendingCache = data.pending ?? [];
       const list = byId("pendingClaims");
-      if (!data.pending || data.pending.length === 0) {
-        list.innerHTML = '<div class="empty">No pending escrow records. Run a verification first.</div>';
+      if (pendingCache.length === 0) {
+        list.innerHTML = '<div class="empty">No pending escrow records — run a verification first.</div>';
+        updateBatchBar();
         return;
       }
-      list.innerHTML = data.pending.map(r => {
+      list.innerHTML = pendingCache.map(r => {
         const kind = r.status; // claimable | refundable
+        const isAttested = r.attested !== false;
+        const explorer = explorerTx(r.depositSignature);
+        const depositorShort = short(r.depositor || r.clientWallet, 8, 4);
+        const isClaimable = kind === "claimable";
+        const canClaim = isClaimable && isAttested;
+        const canRefund = kind === "refundable";
+        const isDepositor = connectedWallet && (connectedWallet.toBase58() === (r.depositor || r.clientWallet));
         return `
-          <div class="proof-item">
+          <div class="proof-item ${isAttested ? "" : "unattested"}">
             <div class="row">
-              <span class="mono">${r.proofId}</span>
+              <span>
+                ${canClaim ? `<input type="checkbox" class="claim-check" data-id="${r.proofId}" style="vertical-align:middle;margin-right:0.4rem;" />` : ""}
+                <span class="mono">${r.proofId}</span>
+              </span>
               <span class="pill ${kind}">${kind}</span>
             </div>
             <div class="muted" style="margin: 0.4rem 0;">
-              Amount: ${(Number(r.amount) / 1e6).toFixed(2)} dUSD · Depositor: <code>${(r.depositor || r.clientWallet).slice(0, 8)}…</code>
+              Amount: ${(Number(r.amount) / 1e6).toFixed(2)} dUSD · Depositor: <code>${depositorShort}</code> · Nonce: <code>${r.nonce ?? "legacy"}</code>
+            </div>
+            <div class="muted">
+              Deposit tx: ${r.depositSignature
+                ? `<a href="${explorer}" target="_blank" class="mono">${short(r.depositSignature, 10, 6)}</a>`
+                : "<em>not recorded</em>"}
+              · ${isAttested
+                ? `<span class="pill attested">✔ attested</span>`
+                : `<span class="pill pending">⚠ attestation pending</span>`}
             </div>
             <div class="claim-actions">
-              <button data-kind="${kind === "claimable" ? "claim" : "refund"}" data-id="${r.proofId}" class="action-btn">
-                ${kind === "claimable" ? "Claim to my wallet" : "Refund to depositor"}
-              </button>
+              ${canClaim ? `<button data-kind="claim" data-id="${r.proofId}" class="action-btn">Claim to my wallet</button>` : ""}
+              ${isClaimable && !isAttested ? `<span class="muted">Unattested — claim disabled. The depositor can refund instead.</span>` : ""}
+              ${canRefund ? `<button data-kind="refund" data-id="${r.proofId}" class="action-btn danger" ${isDepositor ? "" : "disabled title=\"Only the depositor wallet can sign a refund\""}>Refund to depositor</button>` : ""}
+              ${canRefund && !isDepositor ? `<span class="muted">Refund requires the depositor wallet (${depositorShort})</span>` : ""}
             </div>
           </div>`;
       }).join("");
 
       list.querySelectorAll(".action-btn").forEach(btn => {
         btn.addEventListener("click", async () => {
-          const record = data.pending.find(r => r.proofId === btn.getAttribute("data-id"));
+          const record = pendingCache.find(r => r.proofId === btn.getAttribute("data-id"));
           const kind = btn.getAttribute("data-kind");
           await claimOrRefund(record, kind);
         });
       });
+      list.querySelectorAll(".claim-check").forEach(cb => cb.addEventListener("change", updateBatchBar));
+      updateBatchBar();
     }
+
+    byId("claimSelectedBtn").addEventListener("click", async () => {
+      if (!connectedWallet) {
+        setEscrowTx("Connect the operator wallet first.", "err");
+        return;
+      }
+      const selected = selectedRecords();
+      if (selected.length === 0) return;
+
+      setEscrowTx(`Building batch claim for ${selected.length} escrow(s)…`);
+      try {
+        const results = [];
+        // Chunk into at most MAX_CLAIMS_PER_TX claim instructions per transaction
+        for (let i = 0; i < selected.length; i += MAX_CLAIMS_PER_TX) {
+          const chunk = selected.slice(i, i + MAX_CLAIMS_PER_TX);
+          const tx = await buildBatchClaimTx(chunk);
+          const sig = await sendAndConfirm(tx, `Batch claim (${chunk.length})`);
+          for (const record of chunk) results.push({ proofId: record.proofId, signature: sig });
+        }
+        await reportSettlementsToServer("claim", results);
+        setEscrowTx(`Batch complete: ${results.length} escrow(s) settled across ${new Set(results.map(r => r.signature)).size} transaction(s).`, "ok");
+        await refreshPending();
+      } catch (err) {
+        setEscrowTx(`Batch claim failed: ${err.message || err}`, "err");
+      }
+    });
 
     byId("refreshPendingBtn").addEventListener("click", refreshPending);
 

@@ -25,6 +25,9 @@ export interface ProofRecord {
     amount: string;
     asset: string;
     refundable: boolean;
+    depositSignature?: string;
+    nonce?: string | null;
+    attested?: boolean;
   };
 }
 

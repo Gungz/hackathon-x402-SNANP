@@ -22,6 +22,12 @@ export interface EscrowRecordStored {
   depositor: string | null;
   /** Escrow PDA extracted from the deposit instruction — used for chain reconciliation */
   escrowPda?: string | null;
+  /** Client-supplied nonce that seeds the escrow PDA (V1) */
+  nonce?: number | null;
+  /** True once the escrow account records the deposit transaction signature (attest landed — REQUIRED in V1) */
+  attested?: boolean;
+  /** Settlement (claim) transaction signatures, in order — batch claims append one per transaction */
+  claimTxSignatures?: string[];
   depositSignature?: string;
   timestamp: string;
 }

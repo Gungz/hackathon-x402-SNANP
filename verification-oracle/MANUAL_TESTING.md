@@ -1,9 +1,22 @@
-# Manual End-to-End Testing Guide — VerificationOracle V0
+# Manual End-to-End Testing Guide — VerificationOracle V1
 
 **Read this first.** This is the honest truth about what is real and what is not.
 Every step below uses real Solana Devnet transactions once the disposable client
 keypair is funded with SOL + dUSD (demo token) or USDC. Unit tests mock the RPC by design; the e2e
-test covers the real flow and skips gracefully when the wallet is unfunded.
+suite covers the real flow and skips gracefully when the wallet is unfunded.
+
+**V1 changes vs V0 — read this or the test steps make no sense:**
+- Escrow is seeded per **deposit**, not per wallet: `["escrow", depositor, nonce]`.
+  A wallet can hold many concurrent unsettled escrows. Nonce reuse fails on-chain.
+- After the deposit confirms, the CLI (or the dashboard) submits an `attest`
+  instruction writing the deposit transaction signature into the escrow account.
+  **Attestation is REQUIRED** — the server will not verify an unattested escrow
+  (it answers `402 attestation_required`). A program cannot know its own
+  transaction's signature, which is why `attest` is a separate instruction.
+- The escrow program was upgraded in place on 2026-11-09 (same program ID
+  `He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a`; a ~15,000-byte program extend was needed).
+- Settlement (claim/refund) is per deposit transaction. Batch claim (one
+  transaction, N `claim` instructions, ≤4 per tx) exists on the dashboard.
 
 ---
 
@@ -20,76 +33,47 @@ on mainnet — devnet only.
 
 ### 1. Fund it with SOL (transaction fees + PDA rent)
 
-Option A — Solana CLI (retry if rate-limited):
-
 ```bash
 solana airdrop 2 7bsn4jyj5S23bpdJUhTF949pqj6UrNvQWbavCBWsDtFT --url devnet
 ```
 
-Option B — Web airdrop when CLI is rate-limited:
-
-- https://faucet.solana.com — paste the public address → 2 SOL per day
+Or https://faucet.solana.com — paste the public address → 2 SOL per day.
 
 ### 2. Fund it with tokens (for the deposit)
 
-Two options — the self-minted demo token is the one that works without a
-CAPTCHA-gated faucet:
-
 **Option A — Self-minted demo token (dUSD) — already done for this wallet**
 
-A dUSD mint was created on devnet and 1,000,000 dUSD were minted to the
-client's ATA (see `demo-token.json`):
-
-- Mint: `BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc`
-- Client ATA: `EDt5jYJA4K3nrzdxVwusGmjuun2Xby3tVC2KPMJVbFNV`
-- Mint authority: the disposable client keypair (devnet only)
-
-To recreate or mint more:
+Mint `BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc`, 1,000,000 dUSD minted to the client ATA `EDt5jYJA4K3nrzdxVwusGmjuun2Xby3tVC2KPMJVbFNV`.
 
 ```bash
 cd verification-oracle
-npx tsx src/create-demo-token.ts   # creates mint + ATA + 1,000,000 dUSD
-```
-
-Use it by exporting `USDC_MINT` pointing at the dUSD mint — for the server,
-the CLI, and the client:
-
-```bash
 export USDC_MINT=BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc
-npm run dev                     # server verifies deposits of dUSD
-npx tsx src/cli.ts verify ... --yes
+npx tsx src/deposit-client.ts balances
 ```
 
-> The deposit flow is SPL Token mint-agnostic — dUSD exercises the exact same
-> code path as USDC. It is NOT real USDC; label it honestly in the demo.
+Expected: SOL > 0, dUSD ~1,000,000 (minus any deposits).
 
-**Option B — Circle's devnet USDC faucet (official Solana USDC faucet)**
+**Option B — Circle's devnet USDC faucet** — same as before; reCAPTCHA may block automation, complete it manually.
 
-1. Go to https://faucet.circle.com
-2. Choose **Solana** → **Devnet**
-3. Paste: `7bsn4jyj5S23bpdJUhTF949pqj6UrNvQWbavCBWsDtFT`
-4. Request USDC (typically 10–50 USDC)
+> dUSD is NOT real USDC — label it honestly in the demo.
 
-> Note: the faucet sits behind a reCAPTCHA that blocks bots — if it reports
-> "unusual traffic", complete it manually in your browser.
+### 3. `.env` — what must be set
 
-### 3. Create the client's token account (ATA)
-
-The ATA already exists for dUSD (created by `create-demo-token.ts`). For a
-fresh token/mint (e.g. Circle USDC after Option B):
-
-```bash
-cd verification-oracle
-USDC_MINT=<mint-address> npx tsx src/deposit-client.ts create-ata
+```env
+TINYFISH_API_KEY=...
+GROQ_API_KEY=...
+GEMINI_API_KEY=...            # optional fallback
+SOLANA_PAY_TO=...             # operator wallet (public key) — receives claims
+ESCROW_PROGRAM_ID=He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a
+PORT=4021
+X402_NETWORK=solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
+X402_PRICE_USD=0.01
+ALLOWED_DOMAINS=bbc.com,espn.com,reuters.com,apnews.com
 ```
 
-### 4. Verify balances
-
-```bash
-USDC_MINT=BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc npx tsx src/deposit-client.ts balances
-```
-
-Expected: SOL > 0, dUSD > 0 (1,000,000 for this wallet).
+> The server needs NO operator private key. The operator claims in the browser with
+> their own wallet (Phantom/Solflare). `SOLANA_PRIVATE_KEY` may exist in `.env` for
+> local scripts — never copy it onto the host (see `.env.example`).
 
 ---
 
@@ -100,13 +84,10 @@ Expected: SOL > 0, dUSD > 0 (1,000,000 for this wallet).
 ```bash
 export USDC_MINT=BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc
 npm run dev
-
-# stop it later (kills the npm wrapper AND the tsx child on port 4021):
-npm run stop            # preview first: npm run stop -- --dry-run
 ```
 
-The server verifies deposits of the dUSD mint when `USDC_MINT` is set; without
-it it expects Circle's devnet USDC.
+Stop it later with `npm run stop`. The first replay writes `spent-signatures.json`
+— delete it only if you want to reset replay protection locally.
 
 ### 1. Unpaid request returns 402
 
@@ -118,7 +99,7 @@ curl -i http://127.0.0.1:4021/verify \
 
 Expect: HTTP 402 + `PAYMENT-REQUIRED` header (base64 x402 V2 terms) + JSON body.
 
-### 2. Stub signature is now rejected
+### 2. Stub signature is rejected
 
 ```bash
 curl -i http://127.0.0.1:4021/verify \
@@ -129,7 +110,7 @@ curl -i http://127.0.0.1:4021/verify \
 
 Expect: HTTP 402 with `error: "payment_invalid"`. No verification runs.
 
-### 3. REAL on-chain flow — CLI payment + verification
+### 3. REAL on-chain flow — deposit + attest + verification, one CLI run
 
 ```bash
 cd verification-oracle
@@ -140,66 +121,77 @@ npx tsx src/cli.ts verify \
   --yes
 ```
 
-**Prerequisite:** this wallet can only have one outstanding escrow. If a
-previous verification was never settled, the deposit fails with "Depositor
- escrow PDA … already exists". Settle it first — check
-`curl http://127.0.0.1:4021/escrow/pending`; claim (YES/NO) or refund
-(UNDECIDED) via the dashboard, then re-run the command.
+V1 change: there is no "one outstanding escrow per wallet" limit anymore. Each
+deposit gets a fresh nonce; concurrent escrows are independent.
 
 What happens (all real):
 
-1. CLI calls `GET /verify` → gets 402 with payment terms
-2. CLI builds an Anchor `deposit` transaction via `@solana/kit` → **signs and
-   submits it to Solana Devnet** — creates the escrow PDA + deposits dUSD (demo token)
-3. CLI retries `POST /verify` with the deposit's **real transaction signature**
-4. Server verifies the transaction on-chain via Devnet RPC (`getTransaction`):
-   program = escrow, instruction = `deposit`, amount matches
-5. Server runs TinyFish Search → TinyFish Fetch → Groq LLM → YES/NO/UNDECIDED
-6. Truth Receipt returned with evidence + escrow status `claimable` / `refundable`
+1. CLI calls `GET /verify` → 402 terms
+2. CLI picks a nonce, builds the Anchor `deposit` tx, **signs and submits it** — creates the escrow PDA `["escrow", depositor, nonce]` + moves dUSD into the escrow token account
+3. CLI immediately submits **`attest`** with the deposit transaction signature (second wallet approval) — writes the signature into the escrow account
+4. CLI retries `POST /verify` with the real deposit signature as `PAYMENT-SIGNATURE`
+5. Server verifies on-chain (`getTransaction`): program, `deposit` discriminator, amount, depositor == fee payer, **escrow PDA matches depositor+nonce**, escrow token account authority, and the escrow account **records exactly this signature** (attestation gate)
+6. TinyFish Search → TinyFish Fetch → Groq (Gemini fallback) → YES/NO/UNDECIDED
+7. Truth Receipt with evidence URLs + deposit signature + nonce + `attested: true` + escrow status `claimable` / `refundable`
 
-Output includes:
-- `Deposit transaction: https://explorer.solana.com/tx/<sig>?cluster=devnet`
-- `Outcome`, `Confidence`, `Proof ID`, evidence source URLs
+Output includes: deposit tx link, attest tx link, nonce, escrow PDA, outcome/confidence, and full evidence URLs (dashboard renders them as clickable links; the CLI prints title + URL per source).
 
-**Cross-check on https://explorer.solana.com/?cluster=devnet** — the deposit
-transaction is visible with the escrow PDA in account keys.
+**Cross-check on https://explorer.solana.com/?cluster=devnet** — the deposit transaction is visible with the escrow PDA in account keys, and `getAccountInfo` on the escrow shows your deposit signature bytes at offset 91.
+
+**Attest failure path:** if step 3 fails, the CLI stops BEFORE retry and prints the deposit signature + nonce. Recover with `npm run attest -- <depositSignature> <nonce>`, then re-run the verify command.
 
 ### 4. Replay protection (same deposit twice)
 
-Take the transaction signature printed by step 3:
+Take the deposit signature printed by step 3:
 
 ```bash
 curl -s http://127.0.0.1:4021/verify -X POST -H "Content-Type: application/json" \
-  -H "PAYMENT-SIGNATURE: <paste-transaction-signature>" \
+  -H "PAYMENT-SIGNATURE: <paste-deposit-signature>" \
   -d '{"question":"Test?","criteria":"Test"}'
 ```
 
-Expect: HTTP 402 with `error: "payment_replay"` — the same deposit transaction
-cannot be used twice.
+Expect: HTTP 402 with `error: "payment_replay"` — and the spent-signature set is now persisted (`spent-signatures.json`), so it survives restarts.
 
-### 5. Dashboard end-to-end
+### 5. Dashboard end-to-end (two approvals per verification)
 
 Open `http://127.0.0.1:4021/`
 
 1. Click **Connect Wallet** (Phantom/Solflare on Devnet)
-2. In section 1, submit the question — set a question and criteria, click **Verify Event**
-3. The dashboard builds a **real `deposit` transaction** (0.01 dUSD → escrow PDA)
-   and asks your wallet to sign it
-4. On approval, the dashboard retries `POST /verify` with the transaction signature
-5. The result appears with outcome, confidence, and evidence sources
-6. Section 2 **Pending Claims** lists the claimable escrow record with your Proof ID
-7. Click **Claim** → wallet signs the `claim` instruction → dUSD moves from the
-   escrow PDA to the operator's wallet. Check balance before/after.
-   The server reconciles `escrow-records.json` against chain on every
-   `/escrow/pending` call; the HTTP claim/refund endpoints independently verify
-   the settlement transaction on-chain when a `signature` is provided.
+2. Section 1 — submit question + criteria → **Verify Event**. The dashboard builds the real `deposit` tx; wallet approves it
+3. Dashboard waits for confirmation, then builds the **`attest`** tx — second wallet approval
+4. Dashboard retries `POST /verify` → result appears with outcome, confidence, evidence, deposit tx link, escrow PDA, nonce
+5. Section 2 lists **one row per deposit transaction** with: short signature + explorer link, nonce, amount, depositor, `✔ attested` badge (or `⚠ attestation pending`)
+6. **Batch claim:** tick the checkboxes on the claimable rows → **Claim selected (N)** → ONE transaction with N `claim` instructions (≤4 claims per transaction; larger selections fan out into sequential transactions). The server then reconciles bookkeeping in `escrow-records.json`
+7. Per-row **Claim** works too (signs one `claim` instruction)
+8. **Refund** is per-row and **depositor-signed only** — an operator wallet cannot produce a valid refund; the button is disabled unless the connected wallet equals the record's depositor
+9. **Unattested rows** show `⚠ attestation pending`, hide Claim, keep Refund available (depositor can always get the money back)
+10. The `attest` approval can also be retried from CLI: `npm run attest -- <depositSignature> <nonce>`
 
-### 6. Test suites
+### 6. Unattested manual test (negative path)
+
+If you want to see the attestation gate reject a payment:
+
+1. `npx tsx src/deposit-client.ts deposit 10000` — it deposits AND attests; instead, build an attest-less deposit by temporarily skipping the attest call (or use `deposit-client.ts` source as a reference), then copy the deposit signature
+2. `curl -s -X POST http://127.0.0.1:4021/verify -H "Content-Type: application/json" -H "PAYMENT-SIGNATURE: <sig>" -d '{"question":"q","criteria":"c"}'`
+3. Expect: `402` with `attestation_required`
+
+### 7. Refund via CLI (depositor keypair — works regardless of attestation)
 
 ```bash
-npm test          # 33 unit tests (RPC mocked — fast)
-npm run test:e2e  # 3 e2e tests (real APIs; real deposit skipped if unfunded)
+export USDC_MINT=BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc
+npx tsx src/deposit-client.ts refund <nonce>
 ```
+
+Sends the depositor-signed `refund` transaction for THAT escrow only (sibling escrows untouched), closes the escrow token account, returns rent to the depositor.
+
+### 8. Test suites
+
+```bash
+npm test          # 34 unit tests (RPC mocked — fast)
+npm run test:e2e  # e2e tests (real APIs; real deposit skipped if unfunded)
+```
+
+Verified 2026-11-09: 34/34 unit tests green; live deposit+attest+verify returned YES 98% (proof 1794203571507); live refund ran (escrow JCZHdv… closed).
 
 ---
 
@@ -212,34 +204,28 @@ npm run test:e2e  # 3 e2e tests (real APIs; real deposit skipped if unfunded)
 | Groq LLM (openai/gpt-oss-120b) | ❌ | Real, via `GROQ_API_KEY` |
 | Gemini fallback | ❌ | Real, via `GEMINI_API_KEY` |
 | Solana Devnet RPC `getTransaction` | ❌ in prod paths | Real HTTP call in server |
-| Devnet RPC in unit tests | ✅ By design | Unit tests mock RPC; e2e doesn't skip |
-| **Payment verification in `npm test`** | ✅ By design | Uses mocked RPC response — deterministic |
+| Devnet RPC in unit tests | ✅ By design | Unit tests mock RPC |
+| **Attestation gate in `npm test`** | ✅ By design | Mock escrow records the submitted signature |
 | **Payment verification in production flow** | ❌ | Real `getTransaction` call to Devnet RPC |
-| Deposit transaction submission (`src/deposit-client.ts`) | ❌ | Real on-chain transaction (needs funded keypair) |
-| Escrow program | ❌ | Deployed to Devnet, real |
-| Dashboard claim/refund | ❌ | Real — requires the deposit to exist first |
-| Proof history | ❌ | Real file on disk (`proofs.json`) |
-| Escrow settlement records | ❌ | Real file on disk (`escrow-records.json`), reconciled against chain |
-| `proofs.json` reset | n/a | Delete before demo to clear |
+| Deposit + attest submission (`src/deposit-client.ts`) | ❌ | Real on-chain transactions (funded keypair required) |
+| Escrow program | ❌ | Deployed to Devnet, real (V1: nonce-seeded, `attest`, attestation-gated) |
+| Batch claim in browser | ❌ | Real wallet signing — **test it in the browser during manual QA** (tasks 4.2/4.3 open) |
+| Vault of proofs (`proofs.json`) | ❌ | Real file on disk |
+| Escrow settlement records (`escrow-records.json`) | ❌ | Real file, reconciled against chain on every `/escrow/pending` |
+| Replay set (`spent-signatures.json`) | ❌ | Real file on disk since V1 |
 
-**Do NOT claim anything beyond this.** The demo credibility comes from doing
-steps 1–5 live, not from what's in this section.
+**Do NOT claim anything beyond this.** The demo credibility comes from doing steps 1–5 live.
 
 ---
 
-## Part 3 — What still needs your action
+## Part 3 — Status (2026-11-09)
 
 - [x] ~~Fund `7bsn4jyj5S23bpdJUhTF949pqj6UrNvQWbavCBWsDtFT` with SOL~~ (5 SOL present)
-- [x] ~~Fund it with devnet USDC~~ → **replaced by self-minted dUSD** (mint
-      `BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc`, 1,000,000 minted to client ATA)
-- [ ] `USDC_MINT=BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc npm run dev`
-      + `USDC_MINT=BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc npx tsx src/cli.ts verify ... --yes`
-- [x] **REAL deposit executed** — signature
-      `5u1ZCoT9Gq78EUPNwK9Rqphfqm3JWk8eKmp32t6xcxThGL1x4BtavQUiXG4FF5LqdxRQaG7W72hV3uKMYn7PboG1`
-      (https://explorer.solana.com/tx/5u1ZCoT9Gq78EUPNwK9Rqphfqm3JWk8eKmp32t6xcxThGL1x4BtavQUiXG4FF5LqdxRQaG7W72hV3uKMYn7PboG1?cluster=devnet)
-      YES 99% confidence, escrow claimable, tx confirmed on-chain (escrow program instruction)
-- [ ] Set `ESCROW_PROGRAM_ID=He1b6VfhTpSzbGpSSL6jDq6TicPqP4WkvQ4xSMPkdy9a`
-      in `verification-oracle/.env` (without trailing period — I sanitize it,
-      but clean values are better)
+- [x] ~~Fund with devnet USDC~~ → dUSD (mint `BUMDmMChHnBuzE7yzVegoojKDgz383zMwNAxb3Lgd8uc`)
+- [x] **V1 program deployed in place** (same program ID; extend 15,000 bytes) — 2026-11-09
+- [x] **Live V1 run: deposit+attest+verify** — deposit `3Lbh5aX2…`, attest `5fbgrkjs…`, YES 98%, escrow `3jmFV5…` claimable (proof `1794203571507-RGlkIE1hbmNo`)
+- [x] **Live refund** — deposit `JCZHdvpo…` (nonce 1794203587823178) → refunded `3zaFEcom…`, account closed on-chain
+- [ ] Manual QA from this document (browser: deposit → attest → claim; batch claim; refund)
+- [ ] `npm run dev` + demo run
+- [ ] Deploy to host (render.yaml present — see README "Deploy")
 - [ ] Delete `proofs.json` if you want a fresh demo
-- [ ] Commit the code to a public repo (required for hackathon submission)

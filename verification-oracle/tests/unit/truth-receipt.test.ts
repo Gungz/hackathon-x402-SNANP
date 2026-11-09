@@ -2,7 +2,7 @@ import "./env-setup";
 import { test, describe, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert";
 import type { Server } from "http";
-import { createRpcMock, type MockRpcState } from "./rpc-mock";
+import { createRpcMock, fakeTxSignature, type MockRpcState } from "./rpc-mock";
 import { app } from "../../src/server";
 
 let server: Server;
@@ -35,7 +35,7 @@ describe("Truth Receipt response", { concurrency: 1 }, () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "PAYMENT-SIGNATURE": `test-truth-${Date.now()}`,
+        "PAYMENT-SIGNATURE": fakeTxSignature(`test-truth-${Date.now()}`),
       },
       body: JSON.stringify({ question: "Test?", criteria: "Test" }),
     });
@@ -57,5 +57,8 @@ describe("Truth Receipt response", { concurrency: 1 }, () => {
     const payment = body.payment as Record<string, unknown>;
     assert.ok(payment.depositSignature, "depositSignature missing from payment");
     assert.ok(typeof payment.depositTransactionUrl === "string", "depositTransactionUrl missing");
+    assert.ok(typeof payment.nonce === "string", "nonce missing from payment");
+    assert.equal(payment.attested, true, "attested should be true in V1");
+    assert.ok(payment.escrowPda, "escrowPda missing from payment");
   });
 });

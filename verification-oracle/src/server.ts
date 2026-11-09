@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import express from "express";
 import * as path from "path";
 import "dotenv/config";
@@ -17,18 +18,41 @@ const escrowProgramId = (process.env.ESCROW_PROGRAM_ID?.trim().replace(/[.]+$/, 
 const USDC_DECIMALS = 6;
 const amountBaseUnits = Math.round(parseFloat(priceUsd) * 10 ** USDC_DECIMALS).toString();
 
-// Settled payment payloads — replay protection (synchronous, prevents TOCTOU)
-const settledPayments = new Set<string>();
+// Settled payment payloads — replay protection (synchronous, prevents TOCTOU).
+// Persisted to disk so a restart does not forget spent signatures.
+const SPENT_SIGNATURES_FILE = process.env.SPENT_SIGNATURES_FILE || path.join(process.cwd(), "spent-signatures.json");
+const settledPayments = new Set<string>(loadSpentSignatures());
 const pendingVerifications = new Set<string>();
+
+function loadSpentSignatures(): string[] {
+  try {
+    if (!fs.existsSync(SPENT_SIGNATURES_FILE)) return [];
+    const parsed = JSON.parse(fs.readFileSync(SPENT_SIGNATURES_FILE, "utf-8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistSpentSignatures(): void {
+  try {
+    fs.writeFileSync(SPENT_SIGNATURES_FILE, JSON.stringify([...settledPayments], null, 2));
+  } catch (err) {
+    console.error("Could not persist spent signatures:", err);
+  }
+}
 
 // Escrow settlement records — persisted to disk so pending state survives restarts
 type EscrowRecord = EscrowRecordStored;
 let escrowRecords: EscrowRecord[] = loadEscrowRecords();
 
-function settleRecord(proofId: string, status: "claimed" | "refunded"): void {
+function settleRecord(proofId: string, status: "claimed" | "refunded", signature?: string): void {
   const idx = escrowRecords.findIndex((r) => r.proofId === proofId);
   if (idx < 0) return;
-  escrowRecords[idx] = { ...escrowRecords[idx], status };
+  const prev = escrowRecords[idx];
+  const claimTxSignatures =
+    status === "claimed" && signature ? [...(prev.claimTxSignatures ?? []), signature] : prev.claimTxSignatures;
+  escrowRecords[idx] = { ...prev, status, claimTxSignatures };
   saveEscrowRecords(escrowRecords);
 }
 
@@ -131,9 +155,12 @@ async function requirePayment(req: express.Request, res: express.Response, next:
 
     pendingVerifications.delete(sigValue);
     settledPayments.add(sigValue);
+    persistSpentSignatures();
     (req as any).paymentSignature = sigValue;
     (req as any).depositor = verification.depositor;
     (req as any).escrowPda = verification.escrowPda ?? null;
+    (req as any).nonce = verification.nonce ?? null;
+    (req as any).attested = verification.attested === true;
     next();
     return;
   }
@@ -177,6 +204,8 @@ app.post("/verify", async (req, res) => {
   const paymentSignature = (req as any).paymentSignature as string | undefined;
   const depositor = (req as any).depositor as string | null;
   const escrowPda = (req as any).escrowPda as string | null;
+  const nonce: bigint | null = (req as any).nonce ?? null;
+  const attested = (req as any).attested === true;
   escrowRecords.push({
     proofId,
     status: escrowStatus as "claimable" | "refundable",
@@ -184,7 +213,10 @@ app.post("/verify", async (req, res) => {
     clientWallet: depositor ?? payToAddress(),
     depositor,
     escrowPda,
+    nonce: nonce === null ? null : Number(nonce),
+    attested,
     depositSignature: paymentSignature,
+    claimTxSignatures: [],
     timestamp,
   });
   saveEscrowRecords(escrowRecords);
@@ -200,6 +232,11 @@ app.post("/verify", async (req, res) => {
     escrowStatus,
     depositSignature: paymentSignature,
     depositor,
+    escrowPda,
+    nonce: nonce === null ? null : nonce.toString(),
+    attested,
+    // Wired to Walrus Memory in the walrus-receipts group — false until then
+    memoryStored: false,
     depositTransactionUrl: `https://explorer.solana.com/tx/${paymentSignature}?cluster=devnet`,
   };
 
@@ -237,6 +274,9 @@ app.post("/verify", async (req, res) => {
         amount: paymentResponse.amount,
         asset: paymentResponse.asset,
         refundable: paymentResponse.refundable,
+        depositSignature: paymentResponse.depositSignature,
+        nonce: paymentResponse.nonce,
+        attested: paymentResponse.attested,
       },
     });
   } catch {
@@ -261,7 +301,7 @@ app.post("/verify", async (req, res) => {
 async function reconcilePendingRecords(): Promise<void> {
   for (const r of escrowRecords) {
     if (r.status !== "claimable" && r.status !== "refundable") continue;
-    const pda = r.escrowPda ?? (r.depositor ? await deriveEscrowPdaAddress(r.depositor) : null);
+    const pda = r.escrowPda ?? (r.depositor ? await deriveEscrowPdaAddress(r.depositor, r.nonce) : null);
     if (!pda) continue;
     if (await fetchEscrowAccountClosed(pda)) {
       const settled = r.status === "claimable" ? "claimed" : "refunded";
@@ -273,8 +313,9 @@ async function reconcilePendingRecords(): Promise<void> {
 
 app.get("/escrow/pending", async (_req, res) => {
   await reconcilePendingRecords();
+  // One record per deposit transaction (V1 nonce-seeded escrows are independent)
   const pending = escrowRecords.filter(
-    (r) => r.status === "claimable" || r.status === "refundable"
+    (r) => (r.status === "claimable" || r.status === "refundable") && r.attested !== false
   );
   res.json({
     pending,
@@ -311,6 +352,13 @@ async function handleSettlement(
     res.status(400).json({ error: `not_${kind}able`, message: `Escrow status is ${record.status}` });
     return;
   }
+  if (record.attested === false) {
+    res.status(409).json({
+      error: "attestation_required",
+      message: "This escrow's deposit signature was never attested on-chain — it cannot be settled. The depositor can refund from the CLI.",
+    });
+    return;
+  }
   if (!record.depositor) {
     res.status(400).json({ error: "invalid_depositor", message: "Record has no depositor on-chain" });
     return;
@@ -325,7 +373,7 @@ async function handleSettlement(
     return;
   }
 
-  const check = await verifySettlementOnChain(kind, signature, record.depositor, payToAddress(), record.escrowPda ?? null);
+  const check = await verifySettlementOnChain(kind, signature, record.depositor, payToAddress(), record.escrowPda ?? null, record.nonce);
   if (!check.ok) {
     res.status(402).json({
       error: "settlement_invalid",
@@ -334,7 +382,7 @@ async function handleSettlement(
     return;
   }
 
-  settleRecord(record.proofId, kind === "claim" ? "claimed" : "refunded");
+  settleRecord(record.proofId, kind === "claim" ? "claimed" : "refunded", signature);
   const updated = escrowRecords.find((r) => r.proofId === record.proofId);
   res.json({ success: true, proofId: record.proofId, status: updated?.status });
 }

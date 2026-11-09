@@ -9,11 +9,14 @@
     "test": "tsx --test tests/unit/*.test.ts",
     "test:e2e": "tsx --test tests/e2e/*.test.ts",
     "deploy:escrow": "cd escrow && anchor deploy --provider.cluster devnet",
-    "stop": "sh scripts/stop-server.sh"
+    "stop": "sh scripts/stop-server.sh",
+    "start": "tsx src/server.ts",
+    "attest": "tsx src/deposit-client.ts attest",
+    "refund": "tsx src/deposit-client.ts refund"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "@solana/kit": "^8.6.0",

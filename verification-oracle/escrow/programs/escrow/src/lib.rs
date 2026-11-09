@@ -1,13 +1,28 @@
-//! x402 Verification Escrow Program
+//! x402 Verification Escrow Program (V1 — multi-payment + attestation)
 //!
 //! Locks SPL Token / Token-2022 payments (USDT/USDC) for an AI oracle
 //! verification request until the oracle completes and the operator claims,
 //! or the client reclaims funds when the verification is inconclusive.
 //!
+//! V1 changes (BREAKING account layout — V0 escrows must be settled first):
+//!   - Escrow PDA is seeded with a client-supplied nonce: one depositor can
+//!     hold many concurrent escrows. Reusing a nonce fails on-chain (init).
+//!   - `attest(deposit_tx_signature)` records the deposit transaction
+//!     signature inside the escrow account. A program cannot read its own
+//!     transaction's signature during execution (it commits to the message),
+//!     so attestation is a separate, client-submitted instruction right
+//!     after the deposit confirms. First write wins; re-attesting with the
+//!     same 64 bytes is a no-op; a different signature fails.
+//!   - `claim` / `refund` re-derive the escrow PDA from the stored
+//!     depositor + stored nonce. Refund stays depositor-signed only and
+//!     ignores attestation so funds can never be stranded by a failed
+//!     attestation.
+//!
 //! Instructions:
-//!   deposit(amount, beneficiary) — client locks tokens into the escrow PDA
-//!   claim()                      — beneficiary (oracle operator) claims tokens
-//!   refund()                     — depositor reclaims tokens (UNDECIDED)
+//!   deposit(amount, nonce)      — client locks tokens into the nonce-seeded escrow PDA
+//!   attest(deposit_tx_signature) — record the deposit transaction signature (required for settlement audit)
+//!   claim()                     — beneficiary (oracle operator) claims tokens
+//!   refund()                    — depositor reclaims tokens (UNDECIDED / failed attest)
 
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Mint, Token, TokenAccount};
@@ -27,9 +42,10 @@ pub mod escrow {
     use super::*;
 
     /// Deposit an SPL token payment into escrow.
-    /// The depositor transfers `amount` to the escrow PDA's token account.
-    /// `beneficiary` is the oracle operator wallet that can claim later.
-    pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+    /// The depositor transfers `amount` to the nonce-seeded escrow PDA's token
+    /// account. `beneficiary` is the oracle operator wallet that can claim later.
+    /// A fresh `nonce` lets the same depositor hold many concurrent escrows.
+    pub fn deposit(ctx: Context<Deposit>, amount: u64, nonce: u64) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         require!(amount > 0, ErrorCode::InvalidAmount);
 
@@ -48,8 +64,28 @@ pub mod escrow {
         escrow.claimed = false;
         escrow.refunded = false;
         escrow.bump = ctx.bumps.escrow;
+        escrow.nonce = nonce;
+        escrow.deposit_tx_signature = [0u8; 64];
 
-        msg!("Deposited {} tokens into escrow for verification", amount);
+        msg!(
+            "Deposited {} tokens into escrow (nonce {}) for verification",
+            amount,
+            nonce
+        );
+        Ok(())
+    }
+
+    /// Record the deposit transaction signature inside the escrow account.
+    /// Called by the client right after the deposit transaction confirms.
+    /// First write wins; the same 64 bytes are a no-op; anything else fails.
+    pub fn attest(ctx: Context<Attest>, deposit_tx_signature: [u8; 64]) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+        if escrow.deposit_tx_signature == [0u8; 64] {
+            escrow.deposit_tx_signature = deposit_tx_signature;
+            msg!("Attested deposit signature for escrow (nonce {})", escrow.nonce);
+        } else if escrow.deposit_tx_signature != deposit_tx_signature {
+            return Err(error!(ErrorCode::AttestationMismatch));
+        }
         Ok(())
     }
 
@@ -63,9 +99,14 @@ pub mod escrow {
             ErrorCode::Unauthorized
         );
 
-        // Verify the escrow account is the correct PDA for the stored depositor
+        // Verify the escrow account is the correct PDA for the stored depositor + nonce
         let expected_pda = Pubkey::create_program_address(
-            &[ESCROW_SEED, escrow.depositor.as_ref(), &[escrow.bump]],
+            &[
+                ESCROW_SEED,
+                escrow.depositor.as_ref(),
+                &escrow.nonce.to_le_bytes(),
+                &[escrow.bump],
+            ],
             &crate::ID,
         )
         .map_err(|_| error!(ErrorCode::Unauthorized))?;
@@ -78,7 +119,13 @@ pub mod escrow {
 
         let depositor = escrow.depositor;
         let bump = escrow.bump;
-        let seeds: &[&[u8]] = &[ESCROW_SEED, depositor.as_ref(), &[bump]];
+        let nonce = escrow.nonce;
+        let seeds: &[&[u8]] = &[
+            ESCROW_SEED,
+            depositor.as_ref(),
+            &nonce.to_le_bytes(),
+            &[bump],
+        ];
         let seed_binding = [seeds];
 
         let cpi_accounts = token::Transfer {
@@ -105,8 +152,11 @@ pub mod escrow {
     }
 
     /// Refund the escrowed tokens to the depositor.
-    /// Used when the oracle returns UNDECIDED (client not charged) or
-    /// when the operator chooses to return funds.
+    /// Used when the oracle returns UNDECIDED (client not charged) or when the
+    /// client wants to reclaim a deposit whose attestation failed. Signed by
+    /// the depositor only — the operator cannot refund on a client's behalf.
+    /// Refund ignores attestation state on purpose: a failed attestation must
+    /// never strand funds.
     pub fn refund(ctx: Context<Refund>) -> Result<()> {
         let escrow = &ctx.accounts.escrow;
         require!(!escrow.claimed && !escrow.refunded, ErrorCode::EscrowClosed);
@@ -116,9 +166,14 @@ pub mod escrow {
             ErrorCode::Unauthorized
         );
 
-        // Verify the escrow account is the correct PDA for the stored depositor
+        // Verify the escrow account is the correct PDA for the stored depositor + nonce
         let expected_pda = Pubkey::create_program_address(
-            &[ESCROW_SEED, escrow.depositor.as_ref(), &[escrow.bump]],
+            &[
+                ESCROW_SEED,
+                escrow.depositor.as_ref(),
+                &escrow.nonce.to_le_bytes(),
+                &[escrow.bump],
+            ],
             &crate::ID,
         )
         .map_err(|_| error!(ErrorCode::Unauthorized))?;
@@ -131,7 +186,13 @@ pub mod escrow {
 
         let depositor = escrow.depositor;
         let bump = escrow.bump;
-        let seeds: &[&[u8]] = &[ESCROW_SEED, depositor.as_ref(), &[bump]];
+        let nonce = escrow.nonce;
+        let seeds: &[&[u8]] = &[
+            ESCROW_SEED,
+            depositor.as_ref(),
+            &nonce.to_le_bytes(),
+            &[bump],
+        ];
         let seed_binding = [seeds];
 
         let cpi_accounts = token::Transfer {
@@ -159,6 +220,7 @@ pub mod escrow {
 }
 
 #[derive(Accounts)]
+#[instruction(amount: u64, nonce: u64)]
 pub struct Deposit<'info> {
     #[account(mut)]
     pub depositor: Signer<'info>,
@@ -168,14 +230,14 @@ pub struct Deposit<'info> {
         init,
         payer = depositor,
         space = 8 + Escrow::INIT_SPACE,
-        seeds = [ESCROW_SEED, depositor.key().as_ref()],
+        seeds = [ESCROW_SEED, depositor.key().as_ref(), &nonce.to_le_bytes()],
         bump
     )]
     pub escrow: Account<'info, Escrow>,
     #[account(
         init,
         payer = depositor,
-        seeds = [ESCROW_TOKEN_SEED, depositor.key().as_ref()],
+        seeds = [ESCROW_TOKEN_SEED, depositor.key().as_ref(), &nonce.to_le_bytes()],
         bump,
         token::mint = mint,
         token::authority = escrow,
@@ -190,6 +252,15 @@ pub struct Deposit<'info> {
     pub mint: Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Attest<'info> {
+    // Any valid escrow account — the stored depositor/nonce identify it; the
+    // account's owner (the escrow program) and discriminator are checked by
+    // Anchor's Account<'info, Escrow> deserialization.
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
 }
 
 #[derive(Accounts)]
@@ -225,6 +296,12 @@ pub struct Escrow {
     pub claimed: bool,
     pub refunded: bool,
     pub bump: u8,
+    /// Client-supplied nonce — allows multiple concurrent escrows per depositor
+    pub nonce: u64,
+    /// Deposit transaction signature (64 bytes, zeroed = unattested).
+    /// Written by `attest` after the deposit confirms — a program cannot read
+    /// its own transaction's signature during execution.
+    pub deposit_tx_signature: [u8; 64],
 }
 
 pub mod error {
@@ -240,6 +317,8 @@ pub mod error {
         InvalidAmount,
         #[msg("Invalid token account for this escrow")]
         InvalidTokenAccount,
+        #[msg("Escrow already attested with a different deposit signature")]
+        AttestationMismatch,
     }
 }
 

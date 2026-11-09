@@ -3,7 +3,7 @@ import { test, describe, before, after, beforeEach, afterEach } from "node:test"
 import assert from "node:assert";
 import type { Server } from "http";
 import { Buffer } from "node:buffer";
-import { createRpcMock, type MockRpcState } from "./rpc-mock";
+import { createRpcMock, fakeTxSignature, type MockRpcState } from "./rpc-mock";
 import { app } from "../../src/server";
 
 let server: Server;
@@ -72,6 +72,27 @@ describe("payment middleware with RPC", { concurrency: 1 }, () => {
     assert.equal(body.error, "payment_invalid");
   });
 
+  test("unattested escrow is rejected with attestation_required", async () => {
+    rpcState = { ...defaultState(), attested: false };
+    globalThis.fetch = createRpcMock(rpcState) as any;
+
+    const res = await fetch(`${baseUrl}/verify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "PAYMENT-SIGNATURE": fakeTxSignature(`attest-fail-${Date.now()}`),
+      },
+      body: JSON.stringify({ question: "Q?", criteria: "C" }),
+    });
+    assert.equal(res.status, 402);
+    const body = (await res.json()) as { error: string; message: string };
+    assert.equal(body.error, "payment_invalid");
+    assert.ok(
+      body.message.includes("attestation_required"),
+      `expected attestation_required, got: ${body.message}`
+    );
+  });
+
   test("deposit naming a different beneficiary is rejected", async () => {
     // Instruction names Token Program as beneficiary — must not pass as payment
     rpcState = { ...defaultState(), beneficiary: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" };
@@ -109,7 +130,7 @@ describe("payment middleware with RPC", { concurrency: 1 }, () => {
   });
 
   test("first valid-looking deposit succeeds, second is replay-rejected", async () => {
-    const sig = `rpc-replay-${Date.now()}`;
+    const sig = fakeTxSignature(`rpc-replay-${Date.now()}`);
 
     const res1 = await fetch(`${baseUrl}/verify`, {
       method: "POST",
